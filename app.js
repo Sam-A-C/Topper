@@ -209,6 +209,24 @@ function hitTest(worldX, worldY) {
 }
 
 // ── Input ──────────────────────────────────────────────────────────────────
+
+// Scroll-to-zoom — keeps the world point under the cursor fixed
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const factor  = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+  const newZoom = Math.max(0.05, Math.min(8, camera.zoom * factor));
+
+  // world pos under cursor before zoom
+  const wx = e.offsetX / (camera.zoom * PX_PER_INCH) + camera.x;
+  const wy = e.offsetY / (camera.zoom * PX_PER_INCH) + camera.y;
+
+  camera.zoom = newZoom;
+
+  // shift camera so that world pos stays under cursor
+  camera.x = wx - e.offsetX / (camera.zoom * PX_PER_INCH);
+  camera.y = wy - e.offsetY / (camera.zoom * PX_PER_INCH);
+}, { passive: false });
+
 canvas.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
   hideContextMenu();
