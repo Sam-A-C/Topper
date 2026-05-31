@@ -9,4 +9,4 @@ services:
       - key: PORT
         value: 3000
       - key: CORS_ORIGIN
-        value: "*"
+        value: "https://topper-g651.onrender.com"
