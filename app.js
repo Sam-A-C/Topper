@@ -63,18 +63,31 @@ function screenToWorldScaled(sx, sy) {
   };
 }
 
+// ── Board layout constants ─────────────────────────────────────────────────
+const BOARD = { x: 0, y: 0, w: 44, h: 60 };
+const STAGING_DEPTH = 14; // inches
+const STAGING_A = { x: 0, y: -STAGING_DEPTH, w: 44, h: STAGING_DEPTH, label: 'Player A — Staging' };
+const STAGING_B = { x: 0, y: 60,             w: 44, h: STAGING_DEPTH, label: 'Player B — Staging' };
+
 // ── Render loop ────────────────────────────────────────────────────────────
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // draw play-area hint (44"×60" — standard 40k)
-  const tl = worldToScreenScaled(0, 0);
-  const br = worldToScreenScaled(44, 60);
-  ctx.strokeStyle = '#2a3a5c';
-  ctx.lineWidth   = 1;
-  ctx.setLineDash([6, 4]);
-  ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+  // staging area A (top)
+  drawStagingArea(STAGING_A);
+
+  // play area (44"×60" — standard 40k matched play)
+  const tl = worldToScreenScaled(BOARD.x, BOARD.y);
+  const br = worldToScreenScaled(BOARD.x + BOARD.w, BOARD.y + BOARD.h);
+  ctx.fillStyle = 'rgba(15, 52, 96, 0.18)';
+  ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+  ctx.strokeStyle = '#3a5a8c';
+  ctx.lineWidth   = 1.5;
   ctx.setLineDash([]);
+  ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+
+  // staging area B (bottom)
+  drawStagingArea(STAGING_B);
 
   // sort by z ascending
   const sorted = [...objects.values()].sort((a, b) => a.z - b.z);
@@ -137,6 +150,29 @@ function render() {
   }
 
   requestAnimationFrame(render);
+}
+
+function drawStagingArea(s) {
+  const tl = worldToScreenScaled(s.x, s.y);
+  const br = worldToScreenScaled(s.x + s.w, s.y + s.h);
+  const sw = br.x - tl.x;
+  const sh = br.y - tl.y;
+
+  ctx.fillStyle = 'rgba(233, 69, 96, 0.06)';
+  ctx.fillRect(tl.x, tl.y, sw, sh);
+
+  ctx.strokeStyle = 'rgba(233, 69, 96, 0.3)';
+  ctx.lineWidth   = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.strokeRect(tl.x, tl.y, sw, sh);
+  ctx.setLineDash([]);
+
+  const fontSize = Math.max(9, 11 * camera.zoom);
+  ctx.fillStyle    = 'rgba(233, 69, 96, 0.45)';
+  ctx.font         = `600 ${fontSize}px 'Segoe UI', sans-serif`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(s.label, tl.x + sw / 2, tl.y + sh / 2);
 }
 
 function roundRect(c, x, y, w, h, r) {
@@ -381,14 +417,21 @@ document.getElementById('btn-leave').addEventListener('click', () => {
 
 // ── Screen transitions ─────────────────────────────────────────────────────
 function centerCameraOnBoard() {
-  const BOARD_W = 44, BOARD_H = 60;
-  const margin = 32; // px padding around the board
-  const zoomW = (canvas.width  - margin * 2) / (BOARD_W * PX_PER_INCH);
-  const zoomH = (canvas.height - margin * 2) / (BOARD_H * PX_PER_INCH);
+  // fit the full area: both staging zones + play area
+  const totalW = BOARD.w;
+  const totalH = BOARD.h + STAGING_DEPTH * 2;
+  const originY = -STAGING_DEPTH; // world top of the full area
+
+  const margin = 32;
+  const zoomW = (canvas.width  - margin * 2) / (totalW * PX_PER_INCH);
+  const zoomH = (canvas.height - margin * 2) / (totalH * PX_PER_INCH);
   camera.zoom = Math.min(zoomW, zoomH);
-  // center world point (22, 30) — board centre — on screen
-  camera.x = 22 - canvas.width  / 2 / (camera.zoom * PX_PER_INCH);
-  camera.y = 30 - canvas.height / 2 / (camera.zoom * PX_PER_INCH);
+
+  // center on the midpoint of the full area
+  const centerWX = BOARD.w / 2;
+  const centerWY = originY + totalH / 2;
+  camera.x = centerWX - canvas.width  / 2 / (camera.zoom * PX_PER_INCH);
+  camera.y = centerWY - canvas.height / 2 / (camera.zoom * PX_PER_INCH);
 }
 
 function showTable() {
