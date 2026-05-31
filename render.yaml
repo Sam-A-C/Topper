@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: topper
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: CORS_ORIGIN
+        value: "*"
