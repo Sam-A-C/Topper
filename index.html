@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Topper</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ── Home screen ───────────────────────────────────────────────────── -->
+<div id="screen-home">
+  <div class="home-card">
+    <h1>TOPPER</h1>
+    <p class="subtitle">2D tabletop simulator</p>
+
+    <div class="home-actions">
+      <button id="btn-start" class="btn-accent">Start</button>
+
+      <button id="btn-show-join" class="btn-ghost">Join</button>
+      <div id="join-form" class="hidden">
+        <input id="join-token-input" type="text" maxlength="6"
+               placeholder="XXXXXX" autocomplete="off" spellcheck="false" />
+        <button id="btn-join" class="btn-accent">Go</button>
+      </div>
+    </div>
+
+    <p class="home-error hidden" id="home-error"></p>
+  </div>
+</div>
+
+<!-- ── Table view ────────────────────────────────────────────────────── -->
+<div id="screen-table" class="hidden">
+
+  <!-- top bar -->
+  <div id="topbar">
+    <div id="token-badge" class="token-badge" title="Click to copy token">
+      <span id="topbar-token">------</span>
+      <span class="copy-hint">copy</span>
+    </div>
+    <div class="spacer"></div>
+    <button id="btn-leave" class="btn-ghost">Leave</button>
+  </div>
+
+  <!-- canvas + sidebar -->
+  <div id="table-body">
+
+    <div id="canvas-wrap">
+      <canvas id="table-canvas"></canvas>
+
+      <!-- toolbar -->
+      <div id="toolbar">
+        <button id="btn-add-token">+ Model</button>
+        <button id="btn-add-card">+ Card</button>
+        <button id="btn-add-tile">+ Tile</button>
+        <button id="btn-clear-table">Clear</button>
+      </div>
+
+      <!-- right-click context menu -->
+      <div id="context-menu" class="hidden">
+        <div class="ctx-item" data-action="add-token">Add Model</div>
+        <div class="ctx-item" data-action="add-card">Add Card</div>
+        <div class="ctx-item" data-action="add-tile">Add Tile</div>
+        <hr class="ctx-sep" />
+        <div class="ctx-item" data-action="remove-object" id="ctx-remove">Remove Object</div>
+      </div>
+    </div>
+
+    <div id="sidebar">
+      <h3>Players</h3>
+      <ul id="player-list"></ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- label modal -->
+<div id="label-modal" class="hidden">
+  <div id="label-modal-box">
+    <p>Label <span class="label-optional">(optional)</span></p>
+    <input id="label-input" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="e.g. Sergeant, Cover…" />
+    <div id="label-modal-actions">
+      <button id="label-cancel" class="btn-ghost">Cancel</button>
+      <button id="label-ok"     class="btn-accent">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- copy toast -->
+<div id="copy-toast">Token copied!</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="socket-client.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

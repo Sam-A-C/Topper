@@ -1,0 +1,14 @@
+# Private design / strategy notes — never commit
+DESIGN_PRIVATE.md
+*.private.md
+
+# Node
+node_modules/
+.env
+
+# Local tooling
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
