@@ -216,6 +216,25 @@ Turn-by-turn narrative grouped round → side → phase, final score, casualties
 
 ---
 
+## Accounts and persistence
+
+Both are **optional**. With neither configured Topper records battles in memory exactly as before — you just can't save them or sign in. The app never has two code paths for this: writes go to the database when one exists and no-op when it doesn't.
+
+- **Signed out** — battles live in memory and are reclaimed once idle (AD-8).
+- **Signed in** — battles are written to Postgres as they happen and appear under "Your battles" on the home screen. Rejoining by token rehydrates from storage, resuming at the phase you left off.
+
+Sign-in is Google only. The browser gets an ID token from Google Identity Services, the server verifies it against Google's keys and issues its own JWT session cookie. No passwords are ever handled.
+
+### Setting it up
+
+**1. Postgres.** Any provider — set `DATABASE_URL`. On Render, add a Postgres instance and use its internal connection string. The schema is created automatically on boot.
+
+**2. Google OAuth client.** At [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials) create an *OAuth 2.0 Client ID* of type **Web application**, add your origin (e.g. `https://topper-g651.onrender.com`, plus `http://localhost:3000` for local work) under **Authorised JavaScript origins**, and set the resulting client ID as `GOOGLE_CLIENT_ID`.
+
+**3. Session secret.** Any long random string as `SESSION_SECRET`.
+
+The server logs exactly which of these are missing on boot.
+
 ## Development
 
 ```bash
@@ -224,11 +243,24 @@ npm install
 npm start        # listens on :3000, also serves the frontend
 ```
 
-`backend/.env`:
+```bash
+npm test         # schema regression check, no database required
+```
+
+`backend/.env` — see `.env.example`:
 ```
 PORT=3000
 CORS_ORIGIN=*
+DATABASE_URL=          # optional; without it, memory only
+GOOGLE_CLIENT_ID=      # optional; requires DATABASE_URL
+SESSION_SECRET=
 ```
+
+## Data model and analytics
+
+Stored battles are shaped for cross-game querying — events are typed rows and units resolve to a shared catalogue so the same unit aggregates across battles. See **[ANALYTICS.md](ANALYTICS.md)** for the schema rationale and worked queries.
+
+Battles also export to versioned JSON (`schema: "topper.battle"`) and import back through the home screen, which round-trips meta, roster and the full event log.
 
 ---
 

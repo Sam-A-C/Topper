@@ -101,6 +101,38 @@ function getBattle(token) {
   return battles.get(token) ?? null;
 }
 
+// Rehydrates a battle loaded from storage back into the live in-memory shape.
+// `nextSeq` continues past the highest stored seq so the log stays strictly
+// ordered across sessions (AD-7).
+function adoptBattle(stored) {
+  const existing = battles.get(stored.token);
+  if (existing) return existing;
+
+  const log = stored.log ?? [];
+  const battle = {
+    token:   stored.token,
+    dbId:    stored.dbId,
+    ownerId: stored.ownerId,
+    players: new Map(),
+    meta:    stored.meta,
+    roster:  new Map(stored.roster.map(u => [u.id, u])),
+    log,
+    cursor:  deriveCursor(log),
+    locks:   new Map(),
+    nextSeq: log.reduce((m, e) => Math.max(m, e.seq), 0) + 1,
+  };
+  battles.set(battle.token, battle);
+  return battle;
+}
+
+// Resume where the recording left off rather than at round 1.
+function deriveCursor(log) {
+  const last = log[log.length - 1];
+  return last
+    ? { round: last.round, side: last.side, phase: last.phase }
+    : { round: 1, side: 'A', phase: 'command' };
+}
+
 function battleForSocket(socketId) {
   const token = socketBattle.get(socketId);
   return token ? battles.get(token) ?? null : null;
@@ -374,7 +406,7 @@ function battleSnapshot(battle, socketId) {
 
 module.exports = {
   PHASES, SIDES, EFFECTS, SIDE_COLORS,
-  createBattle, getBattle, battleForSocket, sweepEmptyBattles,
+  createBattle, getBattle, adoptBattle, battleForSocket, sweepEmptyBattles,
   addPlayer, removePlayer, renamePlayer,
   setMeta,
   addUnit, removeUnit,

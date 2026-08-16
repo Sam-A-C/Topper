@@ -67,10 +67,13 @@ function s2w(sx, sy) {
 function fitCamera() {
   const totalH = BOARD.h + RESERVE_DEPTH * 2;
   const margin = 28;
-  camera.zoom = Math.min(
+  // Clamped to the same range as scroll-zoom: called before layout settles,
+  // canvas dimensions can be tiny or zero and would otherwise yield a zoom
+  // of ~0 (or NaN), which renders nothing and breaks sub-pixel geometry.
+  camera.zoom = Math.max(0.05, Math.min(8, Math.min(
     (canvas.width  - margin * 2) / (BOARD.w * PX_PER_INCH),
     (canvas.height - margin * 2) / (totalH  * PX_PER_INCH),
-  );
+  ) || 0.05));
   camera.x = BOARD.w / 2 - canvas.width  / 2 / (camera.zoom * PX_PER_INCH);
   camera.y = (BOARD.h / 2) - canvas.height / 2 / (camera.zoom * PX_PER_INCH);
 }
@@ -203,11 +206,16 @@ function drawUnit(u) {
 
     const frac = u.def.startingStrength
       ? Math.max(0, Math.min(1, u.strength / u.def.startingStrength)) : 1;
-    if (frac < 1 && !destroyed) {
+    // The inset arc is only drawn when the token is big enough to hold it —
+    // below that, r minus the clamped stroke width would go negative and
+    // arc() throws, taking the whole render loop down.
+    const lw = Math.max(2, r * 0.3);
+    const arcR = r - lw / 2;
+    if (frac < 1 && !destroyed && arcR > 0.5) {
       ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-      ctx.lineWidth = Math.max(2, r * 0.3);
+      ctx.lineWidth = lw;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, r - ctx.lineWidth / 2,
+      ctx.arc(p.x, p.y, arcR,
               -Math.PI / 2 + Math.PI * 2 * frac, -Math.PI / 2 + Math.PI * 2);
       ctx.stroke();
     }
@@ -905,10 +913,21 @@ document.getElementById('btn-record').addEventListener('click', async () => {
   });
 });
 
-// ── JSON export ────────────────────────────────────────────────────────────
+// ── JSON export / import ───────────────────────────────────────────────────
+// Versioned so old exports stay readable, and round-trips through import:
+// meta + roster + the full event log is everything needed to rebuild a battle.
+
+const EXPORT_VERSION = 1;
+
 document.getElementById('btn-export-json').addEventListener('click', () => {
-  const blob = new Blob(
-    [JSON.stringify({ meta, roster, log }, null, 2)], { type: 'application/json' });
+  const payload = {
+    schema: 'topper.battle',
+    version: EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    token: battleToken,
+    meta, roster, log,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -916,6 +935,186 @@ document.getElementById('btn-export-json').addEventListener('click', () => {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 });
+
+document.getElementById('btn-import').addEventListener('click',
+  () => document.getElementById('import-file').click());
+
+document.getElementById('import-file').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  let data;
+  try { data = JSON.parse(await file.text()); }
+  catch { setHomeError('That file is not valid JSON.'); return; }
+
+  if (data.schema !== 'topper.battle' || !Array.isArray(data.log)) {
+    setHomeError('That does not look like a Topper battle export.'); return;
+  }
+  if (data.version > EXPORT_VERSION) {
+    setHomeError('That export came from a newer version of Topper.'); return;
+  }
+  setHomeError('');
+  importBattle(data);
+});
+
+// Replays an export into a fresh battle. Unit ids are remapped because the
+// server mints its own, so every event is rewritten to the new ids.
+async function importBattle(data) {
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  openSocket();
+  emit('battle:start', {});
+  await wait(400);
+  if (!battleToken) { setHomeError('Could not reach the server.'); return; }
+
+  if (data.meta) emit('meta:set', data.meta);
+
+  const idMap = new Map();
+  const pending = (data.roster ?? []).map(u => u.id);
+  for (const u of data.roster ?? []) {
+    emit('unit:add', {
+      name: u.name, side: u.side, kind: u.kind,
+      startingStrength: u.startingStrength, size: u.size,
+    });
+  }
+  await wait(200 + pending.length * 60);
+
+  // server preserves add order, so pair old ids to new by index
+  pending.forEach((oldId, i) => { if (roster[i]) idMap.set(oldId, roster[i].id); });
+
+  const remap = id => idMap.get(id) ?? id;
+  let lastCursor = null;
+
+  for (const ev of data.log) {
+    const c = `${ev.round}|${ev.side}|${ev.phase}`;
+    if (c !== lastCursor) {
+      emit('battle:setCursor', { round: ev.round, side: ev.side, phase: ev.phase });
+      lastCursor = c;
+      await wait(40);
+    }
+    const out = { ...ev };
+    delete out.id; delete out.seq; delete out.ts;
+    for (const k of ['unitId', 'shooterId', 'attackerId', 'chargerId', 'targetId']) {
+      if (out[k]) out[k] = remap(out[k]);
+    }
+    emit('log:append', out);
+    await wait(18);
+  }
+  await wait(300);
+  toast(`Imported ${data.log.length} events`);
+}
+
+// ── Account ────────────────────────────────────────────────────────────────
+let authState = { signedIn: false };
+
+function renderAccount() {
+  const out  = document.getElementById('signed-out');
+  const inEl = document.getElementById('signed-in');
+  const na   = document.getElementById('auth-unavailable');
+  const saved = document.getElementById('saved-battles');
+
+  const configured = authState.signedIn || authState.enabled;
+  na.classList.toggle('hidden', configured);
+  out.classList.toggle('hidden', authState.signedIn || !authState.enabled);
+  inEl.classList.toggle('hidden', !authState.signedIn);
+  saved.classList.toggle('hidden', !authState.signedIn);
+
+  if (authState.signedIn) {
+    document.getElementById('account-email').textContent = authState.email ?? '';
+    const pic = document.getElementById('account-pic');
+    if (authState.picture) { pic.src = authState.picture; pic.classList.remove('hidden'); }
+    else pic.classList.add('hidden');
+    loadBattleList();
+  } else if (authState.enabled) {
+    mountGoogleButton(authState.clientId);
+  }
+}
+
+let googleMounted = false;
+function mountGoogleButton(clientId) {
+  if (googleMounted || !clientId || !window.google?.accounts?.id) return;
+  googleMounted = true;
+  google.accounts.id.initialize({
+    client_id: clientId,
+    callback: async ({ credential }) => {
+      const res = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ credential }),
+      });
+      if (!res.ok) { setHomeError('Sign-in failed.'); return; }
+      const { user } = await res.json();
+      authState = { signedIn: true, enabled: true, ...user };
+      renderAccount();
+    },
+  });
+  google.accounts.id.renderButton(document.getElementById('google-btn'),
+    { theme: 'filled_black', size: 'large', shape: 'pill', text: 'signin_with' });
+}
+
+async function loadBattleList() {
+  const ul = document.getElementById('battle-list');
+  ul.innerHTML = '';
+  let battles = [];
+  try {
+    const res = await fetch('/api/battles', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    ({ battles } = await res.json());
+  } catch { return; }
+
+  if (!battles.length) {
+    const li = document.createElement('li');
+    li.className = 'battle-empty';
+    li.textContent = 'No saved battles yet.';
+    ul.appendChild(li);
+    return;
+  }
+  for (const b of battles) {
+    const li = document.createElement('li');
+    li.className = 'battle-item';
+    const when = new Date(b.updated_at).toLocaleDateString();
+    li.innerHTML = `
+      <span class="battle-name">${esc(b.name || 'Untitled')}</span>
+      <span class="battle-meta">${esc(b.side_a_name)} v ${esc(b.side_b_name)} · ${when}</span>`;
+    li.addEventListener('click', () => { openSocket(); emit('battle:join', { token: b.token }); });
+    ul.appendChild(li);
+  }
+}
+
+document.getElementById('btn-signout').addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+  authState = { signedIn: false, enabled: authState.enabled, clientId: authState.clientId };
+  googleMounted = false;
+  document.getElementById('google-btn').innerHTML = '';
+  renderAccount();
+});
+
+// Fetched up front so the home screen knows whether saving is even possible.
+(async function initAccount() {
+  try {
+    const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
+    const { user, auth } = await res.json();
+    authState = user
+      ? { signedIn: true, enabled: true, ...user }
+      : { signedIn: false, ...auth };
+  } catch {
+    authState = { signedIn: false, enabled: false };
+  }
+  renderAccount();
+  // the GIS script may still be loading
+  if (!authState.signedIn && authState.enabled) {
+    setTimeout(() => mountGoogleButton(authState.clientId), 600);
+  }
+})();
+
+function renderSaveState(persisted) {
+  const el = document.getElementById('save-state');
+  el.textContent = persisted ? 'Saved' : 'Not saved';
+  el.classList.toggle('is-saved', !!persisted);
+  el.title = persisted
+    ? 'This battle is stored to your account.'
+    : 'Sign in before starting a battle to keep it.';
+}
 
 // ── Add-unit modal ─────────────────────────────────────────────────────────
 const unitModal = document.getElementById('unit-modal');
@@ -1024,10 +1223,17 @@ function doJoin() {
   emit('battle:join', { token });
 }
 
+let socketOpened = false;
 function openSocket() {
   connectSocket(location.origin);
+  if (socketOpened) return;      // handlers survive; binding again would double-fire
+  socketOpened = true;
   on('battle:state', handleBattleState);
   on('battle:error', ({ message }) => setHomeError(message));
+  on('auth:state', (s) => {
+    authState = s.signedIn ? { ...s, enabled: true } : { signedIn: false, ...s };
+    renderAccount();
+  });
 }
 
 // ── Socket handlers ────────────────────────────────────────────────────────
@@ -1044,6 +1250,7 @@ function handleBattleState(state) {
   players.clear();
   for (const p of state.players) players.set(p.socketId, { username: p.username, color: p.color });
 
+  renderSaveState(state.persisted);
   renderPlayers();
   showBattle();
   wireBattleEvents();

@@ -2,13 +2,16 @@
 
 require('dotenv').config();
 
-const express    = require('express');
-const http       = require('http');
-const { Server } = require('socket.io');
-const cors       = require('cors');
-const path       = require('path');
+const express      = require('express');
+const http         = require('http');
+const { Server }   = require('socket.io');
+const cors         = require('cors');
+const cookieParser = require('cookie-parser');
+const path         = require('path');
 
-const bm = require('./lobbyManager');
+const bm   = require('./lobbyManager');
+const db   = require('./db');
+const auth = require('./auth');
 
 const PORT        = process.env.PORT        || 3000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
@@ -16,41 +19,97 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 // --- Express -------------------------------------------------------------
 
 const app = express();
-app.use(cors({ origin: CORS_ORIGIN }));
+app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
+app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());
+app.use(auth.attachUser);
+
+auth.routes(app);
+
 app.use(express.static(path.join(__dirname, '..')));
 
 const server = http.createServer(app);
 
-// --- Socket.io -----------------------------------------------------------
-
 const io = new Server(server, {
-  cors: { origin: CORS_ORIGIN, methods: ['GET', 'POST'] },
+  cors: { origin: CORS_ORIGIN, methods: ['GET', 'POST'], credentials: true },
 });
 
+// --- Persistence helpers -------------------------------------------------
+//
+// Every write is fire-and-forget: a database hiccup must never break a live
+// recording session. The in-memory battle stays authoritative for the
+// session; the DB is durable storage that trails it.
+
+function persist(label, promise) {
+  if (!db.enabled) return;
+  Promise.resolve(promise).catch(err =>
+    console.error(`[persist:${label}]`, err.message));
+}
+
+// Attaches a DB row to a battle the first time it needs one.
+async function ensureRow(battle, userId) {
+  if (!db.enabled) return null;
+  if (!battle.dbId) {
+    battle.dbId = await db.createBattleRow(battle, userId);
+  } else if (userId && !battle.ownerId) {
+    await db.claimBattle(battle.dbId, userId);
+    battle.ownerId = userId;
+  }
+  return battle.dbId;
+}
+
 io.on('connection', (socket) => {
+  const user = auth.userFromHandshake(socket);
+  socket.data.userId = user?.uid ?? null;
+
+  socket.emit('auth:state', user
+    ? { signedIn: true, email: user.email, name: user.name, picture: user.picture }
+    : { signedIn: false, ...auth.status() });
+
   // -----------------------------------------------------------------------
   // Battle lifecycle
   // -----------------------------------------------------------------------
 
-  socket.on('battle:start', () => {
+  socket.on('battle:start', async () => {
     const battle = bm.createBattle();
+    battle.ownerId = socket.data.userId;
     bm.addPlayer(battle, socket.id);
     socket.join(battle.token);
-    socket.emit('battle:state', bm.battleSnapshot(battle, socket.id));
+    socket.emit('battle:state', {
+      ...bm.battleSnapshot(battle, socket.id),
+      persisted: !!socket.data.userId && db.enabled,
+    });
+    persist('createBattle', ensureRow(battle, socket.data.userId));
   });
 
-  socket.on('battle:join', ({ token } = {}) => {
+  socket.on('battle:join', async ({ token } = {}) => {
     if (!token) return socket.emit('battle:error', { message: 'Token required.' });
-    const battle = bm.getBattle(String(token).toUpperCase());
+    const code = String(token).toUpperCase();
+
+    let battle = bm.getBattle(code);
+
+    // Not in memory — try to rehydrate it from the database.
+    if (!battle && db.enabled) {
+      try {
+        const stored = await db.loadBattle(code);
+        if (stored) battle = bm.adoptBattle(stored);
+      } catch (err) {
+        console.error('[loadBattle]', err.message);
+      }
+    }
+
     if (!battle) return socket.emit('battle:error', { message: 'Battle not found.' });
+
     const player = bm.addPlayer(battle, socket.id);
     socket.join(battle.token);
-    socket.emit('battle:state', bm.battleSnapshot(battle, socket.id));
-    socket.to(battle.token).emit('lobby:playerJoined', {
-      socketId: socket.id,
-      username: player.username,
-      color:    player.color,
+    socket.emit('battle:state', {
+      ...bm.battleSnapshot(battle, socket.id),
+      persisted: !!battle.ownerId && db.enabled,
     });
+    socket.to(battle.token).emit('lobby:playerJoined', {
+      socketId: socket.id, username: player.username, color: player.color,
+    });
+    persist('claim', ensureRow(battle, socket.data.userId));
   });
 
   socket.on('disconnect', () => {
@@ -68,7 +127,7 @@ io.on('connection', (socket) => {
   });
 
   // -----------------------------------------------------------------------
-  // Battle metadata
+  // Metadata
   // -----------------------------------------------------------------------
 
   socket.on('meta:set', (patch = {}) => {
@@ -76,6 +135,10 @@ io.on('connection', (socket) => {
     if (!battle) return;
     const meta = bm.setMeta(battle, patch);
     io.to(battle.token).emit('meta:updated', meta);
+    persist('meta', (async () => {
+      const id = await ensureRow(battle, socket.data.userId);
+      if (id) await db.updateBattleMeta(id, meta);
+    })());
   });
 
   // -----------------------------------------------------------------------
@@ -89,30 +152,43 @@ io.on('connection', (socket) => {
     try { unit = bm.addUnit(battle, def); }
     catch { return; }
     io.to(battle.token).emit('unit:added', unit);
+    persist('unit', (async () => {
+      const id = await ensureRow(battle, socket.data.userId);
+      if (id) await db.insertUnit(id, unit, battle.meta.sides[unit.side]?.faction);
+    })());
   });
 
   socket.on('unit:remove', ({ id } = {}) => {
     const battle = bm.battleForSocket(socket.id);
     if (!battle || !id) return;
-    if (bm.removeUnit(battle, id)) io.to(battle.token).emit('unit:removed', { id });
+    if (!bm.removeUnit(battle, id)) return;
+    io.to(battle.token).emit('unit:removed', { id });
+    persist('unitRemove', db.deleteUnit(id));
   });
 
   // -----------------------------------------------------------------------
-  // The log (AD-7) — single write path for all board state
+  // The log (AD-7). battle_events is this same sequence, made durable.
   // -----------------------------------------------------------------------
 
   socket.on('log:append', (raw = {}) => {
     const battle = bm.battleForSocket(socket.id);
     if (!battle) return;
     const ev = bm.appendEvent(battle, raw);
-    if (ev) io.to(battle.token).emit('log:appended', ev);
+    if (!ev) return;
+    io.to(battle.token).emit('log:appended', ev);
+    persist('event', (async () => {
+      const id = await ensureRow(battle, socket.data.userId);
+      if (id) await db.insertEvent(id, ev);
+    })());
   });
 
   socket.on('log:undo', () => {
     const battle = bm.battleForSocket(socket.id);
     if (!battle) return;
     const seq = bm.undoLast(battle);
-    if (seq !== null) io.to(battle.token).emit('log:undone', { seq });
+    if (seq === null) return;
+    io.to(battle.token).emit('log:undone', { seq });
+    if (battle.dbId) persist('undo', db.deleteEventBySeq(battle.dbId, seq));
   });
 
   // -----------------------------------------------------------------------
@@ -128,13 +204,11 @@ io.on('connection', (socket) => {
   socket.on('battle:stepCursor', ({ dir } = {}) => {
     const battle = bm.battleForSocket(socket.id);
     if (!battle) return;
-    const next = bm.stepCursor(battle, dir > 0 ? 1 : -1);
-    io.to(battle.token).emit('battle:cursorSet', next);
+    io.to(battle.token).emit('battle:cursorSet', bm.stepCursor(battle, dir > 0 ? 1 : -1));
   });
 
   // -----------------------------------------------------------------------
-  // Drag (movement phase) — position preview only. The authoritative
-  // position change is the `move` event the client appends on release.
+  // Drag (movement phase) — preview only; the `move` event is authoritative.
   // -----------------------------------------------------------------------
 
   socket.on('unit:grab', ({ id } = {}) => {
@@ -165,12 +239,20 @@ io.on('connection', (socket) => {
 
 // --- Housekeeping --------------------------------------------------------
 
-// Reclaim battles nobody has returned to. Runs hourly; the TTL itself lives
-// in lobbyManager.
+// Only evicts battles from MEMORY. Anything with an owner is already durable
+// in the database and can be rejoined by token at any time.
 setInterval(() => bm.sweepEmptyBattles(), 60 * 60 * 1000).unref?.();
 
 // --- Start ---------------------------------------------------------------
 
-server.listen(PORT, () => {
-  console.log(`Topper battle recorder listening on http://localhost:${PORT}`);
-});
+db.init()
+  .catch(err => console.error('[db.init]', err.message))
+  .finally(() => {
+    const a = auth.status();
+    if (!a.enabled) {
+      console.log(`Sign-in disabled (missing: ${a.missing.join(', ')}).`);
+    }
+    server.listen(PORT, () => {
+      console.log(`Topper battle recorder listening on http://localhost:${PORT}`);
+    });
+  });

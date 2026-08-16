@@ -23,9 +23,35 @@
                placeholder="XXXXXX" autocomplete="off" spellcheck="false" />
         <button id="btn-join" class="btn-accent">Go</button>
       </div>
+
+      <button id="btn-import" class="btn-ghost">Import JSON</button>
+      <input id="import-file" type="file" accept="application/json" class="hidden" />
     </div>
 
     <p class="home-error hidden" id="home-error"></p>
+
+    <!-- account -->
+    <div id="account-block">
+      <div id="signed-out" class="hidden">
+        <div class="account-hint">Sign in to save battles</div>
+        <div id="google-btn"></div>
+      </div>
+      <div id="signed-in" class="hidden">
+        <div class="account-row">
+          <img id="account-pic" alt="" />
+          <span id="account-email"></span>
+          <button id="btn-signout" class="link-btn">Sign out</button>
+        </div>
+      </div>
+      <div id="auth-unavailable" class="account-hint hidden">
+        Saving is unavailable — this server has no database configured.
+      </div>
+    </div>
+
+    <div id="saved-battles" class="hidden">
+      <h4>Your battles</h4>
+      <ul id="battle-list"></ul>
+    </div>
   </div>
 </div>
 
@@ -52,6 +78,7 @@
     </div>
 
     <div class="spacer"></div>
+    <span id="save-state" class="save-state" title="">Not saved</span>
     <button id="btn-report" class="btn-ghost">Report</button>
     <button id="btn-leave"  class="btn-ghost">Leave</button>
   </div>
@@ -168,6 +195,7 @@
 <!-- toast -->
 <div id="toast"></div>
 
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="/socket.io/socket.io.js"></script>
 <script src="socket-client.js"></script>
 <script src="battle.js"></script>

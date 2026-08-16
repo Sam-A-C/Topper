@@ -76,6 +76,41 @@ button { cursor: pointer; border: none; font-family: inherit; }
 #join-token-input:focus { border-color: var(--accent); }
 .home-error { color: var(--accent); font-size: 12px; margin-top: 10px; min-height: 18px; }
 
+/* account block on home */
+#account-block { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--border); }
+.account-hint { font-size: 11.5px; color: var(--text-muted); margin-bottom: 10px; }
+#google-btn { display: flex; justify-content: center; min-height: 40px; }
+.account-row { display: flex; align-items: center; gap: 9px; justify-content: center; font-size: 12.5px; }
+#account-pic { width: 24px; height: 24px; border-radius: 50%; }
+#account-email { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link-btn {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 12px; text-decoration: underline; padding: 0; font-family: inherit;
+}
+.link-btn:hover { color: var(--accent); }
+
+#saved-battles { margin-top: 20px; text-align: left; }
+#saved-battles h4 {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text-muted); margin-bottom: 8px;
+}
+#battle-list { list-style: none; max-height: 190px; overflow-y: auto; }
+.battle-item {
+  display: grid; gap: 1px; padding: 8px 10px; border-radius: 8px;
+  cursor: pointer; border: 1px solid transparent;
+}
+.battle-item:hover { background: var(--card); border-color: var(--border); }
+.battle-name { font-size: 13px; font-weight: 600; }
+.battle-meta { font-size: 11px; color: var(--text-muted); }
+.battle-empty { font-size: 11.5px; color: var(--text-muted); font-style: italic; padding: 6px 2px; }
+
+/* save indicator */
+.save-state {
+  font-size: 11px; color: var(--text-muted);
+  border: 1px solid var(--border); border-radius: 20px; padding: 3px 11px;
+}
+.save-state.is-saved { color: #81c784; border-color: #2c5c42; }
+
 /* ── Battle layout ───────────────────────────────────────────────────── */
 
 #screen-battle { display: flex; flex-direction: column; height: 100%; }

@@ -5,7 +5,11 @@
 
 let _socket = null;
 
+// Idempotent. Replacing a live socket would orphan every handler already
+// bound through on(), leaving the app connected but deaf, so an existing
+// connection is always reused.
 function connectSocket(serverUrl) {
+  if (_socket && (_socket.connected || _socket.active)) return _socket;
   _socket = io(serverUrl, { transports: ['websocket', 'polling'] });
   return _socket;
 }
