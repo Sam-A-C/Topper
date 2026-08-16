@@ -22,7 +22,7 @@ const sel = { actorId: null, targetId: null };
 let moveType = 'normal';
 
 const drag = { active: false, unitId: null, pending: null, offsetX: 0, offsetY: 0,
-               preview: null, origin: null };
+               preview: null, origin: null, moved: false, downX: 0, downY: 0 };
 
 const ctxMenu = { worldX: 0, worldY: 0, targetId: null };
 
@@ -421,15 +421,17 @@ canvas.addEventListener('mousedown', (e) => {
 
   if (!u) { startPan(e, true); return; }
 
-  if (cursor.phase === 'movement') {
-    drag.pending = u.id;
-    drag.offsetX = wx - u.x;
-    drag.offsetY = wy - u.y;
-    drag.origin  = u.deployed ? { x: u.x, y: u.y } : null;
-    emit('unit:grab', { id: u.id });
-  } else {
-    pickForEntry(u);
-  }
+  // Units are draggable in every phase. Whether this press is a selection or
+  // a move is not knowable yet, so both are prepared and mouseup decides
+  // based on whether the pointer actually travelled.
+  drag.pending = u.id;
+  drag.offsetX = wx - u.x;
+  drag.offsetY = wy - u.y;
+  drag.origin  = u.deployed ? { x: u.x, y: u.y } : null;
+  drag.moved   = false;
+  drag.downX   = e.clientX;
+  drag.downY   = e.clientY;
+  emit('unit:grab', { id: u.id });
 });
 
 canvas.addEventListener('mousemove', (e) => {
@@ -441,7 +443,13 @@ canvas.addEventListener('mousemove', (e) => {
     camera.y = pan.camY - dy / scale;
     return;
   }
-  if (!drag.active) return;
+  if (!drag.pending) return;
+  if (!drag.moved) {
+    // a few pixels of travel while clicking should not nudge a unit
+    if (Math.hypot(e.clientX - drag.downX, e.clientY - drag.downY) < 4) return;
+    drag.moved = true;
+  }
+  if (!drag.active) return;                  // still waiting on the grab
   const { x: wx, y: wy } = s2w(e.offsetX, e.offsetY);
   drag.preview = { x: wx - drag.offsetX, y: wy - drag.offsetY };
   emit('unit:drag', { id: drag.unitId, x: drag.preview.x, y: drag.preview.y });
@@ -456,21 +464,30 @@ canvas.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefaul
 
 // On release the drag becomes an event — the log is the only write path.
 function finishDrag() {
-  if (!drag.active) { drag.pending = null; return; }
-  const u = unitState.get(drag.unitId);
+  const id = drag.pending;
+  if (!id) return;
+  const u = unitState.get(id);
   const to = drag.preview;
 
-  if (u && to) {
+  if (drag.moved && drag.active && u && to) {
     if (!u.deployed) {
       appendEvent({ type: 'deploy', unitId: u.id, x: to.x, y: to.y });
     } else {
-      appendEvent({ type: 'move', unitId: u.id, from: drag.origin, to, moveType });
+      // Outside the movement phase a drag is the recorder correcting where a
+      // token sits, not the unit advancing. Logging it as a normal move would
+      // put "Intercessors moved 7 inches" in the middle of the shooting phase
+      // of the report.
+      const kind = cursor.phase === 'movement' ? moveType : 'reposition';
+      appendEvent({ type: 'move', unitId: u.id, from: drag.origin, to, moveType: kind });
     }
+  } else if (!drag.moved && u) {
+    pickForEntry(u);                        // it was a click, not a drag
+    renderRoster();
   }
-  emit('unit:release', { id: drag.unitId });
 
+  emit('unit:release', { id });
   drag.active = false; drag.unitId = null; drag.pending = null;
-  drag.preview = null; drag.origin = null;
+  drag.preview = null; drag.origin = null; drag.moved = false;
 }
 
 // Clicking units fills the entry bar: own side = actor, enemy = target.

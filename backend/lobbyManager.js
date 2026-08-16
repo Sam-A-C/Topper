@@ -309,8 +309,8 @@ function appendEvent(battle, raw = {}) {
         unitId:   raw.unitId,
         from:     raw.from ? { x: +raw.from.x, y: +raw.from.y } : null,
         to:       { x: +raw.to.x, y: +raw.to.y },
-        moveType: ['stationary','normal','advance','fallback','reserves'].includes(raw.moveType)
-                  ? raw.moveType : 'normal',
+        moveType: ['stationary','normal','advance','fallback','reserves','reposition']
+                  .includes(raw.moveType) ? raw.moveType : 'normal',
       });
       break;
 

@@ -36,7 +36,13 @@ const MOVE_LABEL = {
   advance:    'advanced',
   fallback:   'fell back',
   reserves:   'went into reserves',
+  reposition: 'repositioned',
 };
+
+// A reposition is the recorder correcting where a token sits, not something
+// that happened in the battle, so it changes board state but is kept out of
+// the narrative.
+const SILENT_MOVES = new Set(['reposition']);
 
 // ── Cursor helpers ───────────────────────────────────────────────────────
 
@@ -244,6 +250,7 @@ function describe(ev, nameOf, sideName) {
       return `${nameOf(ev.unitId)} deployed.`;
 
     case 'move': {
+      if (SILENT_MOVES.has(ev.moveType)) return null;
       const verb = MOVE_LABEL[ev.moveType] ?? 'moved';
       if (ev.moveType === 'stationary') return `${nameOf(ev.unitId)} ${verb}.`;
       const dist = ev.from ? distance(ev.from, ev.to) : null;
@@ -293,7 +300,7 @@ function distance(a, b) {
 
 // Expose for both the app and the exported report.
 const Battle = {
-  PHASES, SIDES, PHASE_LABEL, EFFECTS, EFFECT_META, MOVE_LABEL,
+  PHASES, SIDES, PHASE_LABEL, EFFECTS, EFFECT_META, MOVE_LABEL, SILENT_MOVES,
   cursorIndex, cursorFromIndex, cursorLabel, eventWithinCursor,
   foldLog, tally, damageTally, narrate, distance,
 };
