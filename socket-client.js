@@ -32,3 +32,17 @@ function off(event, cb) {
 function socketId() {
   return _socket?.id ?? null;
 }
+
+// Fires after socket.io transparently re-establishes a dropped connection.
+// The new socket has a new id, so the server no longer associates it with
+// any battle — callers must re-join before writing anything else.
+function onReconnect(cb) {
+  if (!_socket) return;
+  _socket.io.on('reconnect', cb);
+}
+
+function onConnectionChange(cb) {
+  if (!_socket) return;
+  _socket.on('connect',    () => cb(true));
+  _socket.on('disconnect', () => cb(false));
+}

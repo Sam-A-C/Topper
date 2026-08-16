@@ -1234,6 +1234,44 @@ function openSocket() {
     authState = s.signedIn ? { ...s, enabled: true } : { signedIn: false, ...s };
     renderAccount();
   });
+
+  // A reconnect gives us a new socket id, which the server does not
+  // associate with any battle. Re-join immediately or every subsequent
+  // write is dropped while the UI still looks connected.
+  onReconnect(() => { if (battleToken) emit('battle:join', { token: battleToken }); });
+
+  onConnectionChange(ok => setConnection(ok ? 'live' : 'offline'));
+
+  // Server-side backstop: it tells us when a write landed on a socket it
+  // has no battle for. Re-join, then replay the write that was refused.
+  on('battle:orphaned', ({ pending }) => {
+    setConnection('recovering');
+    if (!battleToken) return;
+    if (pending) orphanQueue.push(pending);
+    emit('battle:join', { token: battleToken });
+  });
+
+  on('battle:rejected', () => toast('That event was not accepted'));
+}
+
+// Writes refused while the socket had no battle, replayed after re-joining.
+let orphanQueue = [];
+
+function flushOrphanQueue() {
+  if (!orphanQueue.length) return;
+  const queued = orphanQueue;
+  orphanQueue = [];
+  for (const ev of queued) emit('log:append', ev);
+  toast(`Reconnected — ${queued.length} event(s) resent`);
+}
+
+function setConnection(state) {
+  const el = document.getElementById('save-state');
+  if (!el) return;
+  el.dataset.conn = state;
+  if (state === 'offline')    el.textContent = 'Offline';
+  else if (state === 'recovering') el.textContent = 'Reconnecting…';
+  else renderSaveState(lastPersisted);
 }
 
 // ── Socket handlers ────────────────────────────────────────────────────────
@@ -1250,11 +1288,15 @@ function handleBattleState(state) {
   players.clear();
   for (const p of state.players) players.set(p.socketId, { username: p.username, color: p.color });
 
+  lastPersisted = state.persisted;
   renderSaveState(state.persisted);
   renderPlayers();
   showBattle();
   wireBattleEvents();
+  flushOrphanQueue();   // replay anything refused while we were orphaned
 }
+
+let lastPersisted = false;
 
 let wired = false;
 function wireBattleEvents() {

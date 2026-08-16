@@ -172,7 +172,7 @@ io.on('connection', (socket) => {
 
   socket.on('unit:add', (def = {}) => {
     const battle = bm.battleForSocket(socket.id);
-    if (!battle) return;
+    if (!battle) return socket.emit('battle:orphaned', { pending: null });
     let unit;
     try { unit = bm.addUnit(battle, def); }
     catch { return; }
@@ -197,9 +197,13 @@ io.on('connection', (socket) => {
 
   socket.on('log:append', (raw = {}) => {
     const battle = bm.battleForSocket(socket.id);
-    if (!battle) return;
+    // A socket with no battle means the server restarted or the connection
+    // was replaced. Dropping the write silently would let a recording session
+    // continue for an entire game and lose everything, so say so and let the
+    // client re-join by token.
+    if (!battle) return socket.emit('battle:orphaned', { pending: raw });
     const ev = bm.appendEvent(battle, raw);
-    if (!ev) return;
+    if (!ev) return socket.emit('battle:rejected', { pending: raw });
     io.to(battle.token).emit('log:appended', ev);
     persist('event', (async () => {
       const id = await ensureRow(battle, socket.data.userId);

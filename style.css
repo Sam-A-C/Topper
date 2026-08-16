@@ -110,6 +110,8 @@ button { cursor: pointer; border: none; font-family: inherit; }
   border: 1px solid var(--border); border-radius: 20px; padding: 3px 11px;
 }
 .save-state.is-saved { color: #81c784; border-color: #2c5c42; }
+.save-state[data-conn="offline"]    { color: var(--accent); border-color: var(--accent); }
+.save-state[data-conn="recovering"] { color: #ffb74d; border-color: #7a5a2c; }
 
 /* ── Battle layout ───────────────────────────────────────────────────── */
 
