@@ -44,12 +44,26 @@ window.addEventListener('resize', () => { resizeCanvas(); fitCamera(); });
 const camera = { x: 0, y: 0, zoom: 1 };
 const PX_PER_INCH = 60;
 
-const BOARD = { x: 0, y: 0, w: 44, h: 60 };
-const RESERVE_DEPTH = 14;
-const RESERVES = {
-  A: { x: 0, y: -RESERVE_DEPTH, w: 44, h: RESERVE_DEPTH },
-  B: { x: 0, y: BOARD.h,        w: 44, h: RESERVE_DEPTH },
-};
+// Orientation is a setting; reserves sit on the short edges either way.
+const RESERVE_DEPTH = 13;
+let BOARD    = { x: 0, y: 0, w: 60, h: 44 };
+let RESERVES = {};
+
+function applyOrientation() {
+  const landscape = Theme.boardOrientation() === 'landscape';
+  BOARD = landscape ? { x: 0, y: 0, w: 60, h: 44 } : { x: 0, y: 0, w: 44, h: 60 };
+  RESERVES = landscape
+    ? { A: { x: -RESERVE_DEPTH, y: 0, w: RESERVE_DEPTH, h: BOARD.h },
+        B: { x: BOARD.w,        y: 0, w: RESERVE_DEPTH, h: BOARD.h } }
+    : { A: { x: 0, y: -RESERVE_DEPTH, w: BOARD.w, h: RESERVE_DEPTH },
+        B: { x: 0, y: BOARD.h,        w: BOARD.w, h: RESERVE_DEPTH } };
+}
+applyOrientation();
+
+// Canvas colours come from the live CSS tokens so the board can never
+// disagree with the chrome around it. Refreshed on every theme change.
+let PAL = null;
+function pal() { return PAL ?? (PAL = Theme.palette()); }
 
 function w2s(wx, wy) {
   return {
@@ -65,17 +79,19 @@ function s2w(sx, sy) {
 }
 
 function fitCamera() {
-  const totalH = BOARD.h + RESERVE_DEPTH * 2;
+  const landscape = Theme.boardOrientation() === 'landscape';
+  const totalW = BOARD.w + (landscape ? RESERVE_DEPTH * 2 : 0);
+  const totalH = BOARD.h + (landscape ? 0 : RESERVE_DEPTH * 2);
   const margin = 28;
   // Clamped to the same range as scroll-zoom: called before layout settles,
   // canvas dimensions can be tiny or zero and would otherwise yield a zoom
   // of ~0 (or NaN), which renders nothing and breaks sub-pixel geometry.
   camera.zoom = Math.max(0.05, Math.min(8, Math.min(
-    (canvas.width  - margin * 2) / (BOARD.w * PX_PER_INCH),
-    (canvas.height - margin * 2) / (totalH  * PX_PER_INCH),
+    (canvas.width  - margin * 2) / (totalW * PX_PER_INCH),
+    (canvas.height - margin * 2) / (totalH * PX_PER_INCH),
   ) || 0.05));
   camera.x = BOARD.w / 2 - canvas.width  / 2 / (camera.zoom * PX_PER_INCH);
-  camera.y = (BOARD.h / 2) - canvas.height / 2 / (camera.zoom * PX_PER_INCH);
+  camera.y = BOARD.h / 2 - canvas.height / 2 / (camera.zoom * PX_PER_INCH);
 }
 
 // ── Fold: the only way board state is produced ─────────────────────────────
@@ -104,9 +120,9 @@ function layoutReserves() {
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  drawZone(RESERVES.A, sideName('A') + ' — Reserves', '#e94560');
+  drawZone(RESERVES.A, sideName('A') + ' — Reserves', pal().sideA);
   drawBoard();
-  drawZone(RESERVES.B, sideName('B') + ' — Reserves', '#4fc3f7');
+  drawZone(RESERVES.B, sideName('B') + ' — Reserves', pal().sideB);
 
   drawRecentLines();
 
@@ -116,31 +132,50 @@ function render() {
 }
 
 function drawBoard() {
+  const p = pal();
   const tl = w2s(BOARD.x, BOARD.y);
   const br = w2s(BOARD.x + BOARD.w, BOARD.y + BOARD.h);
-  ctx.fillStyle = 'rgba(15, 52, 96, 0.20)';
-  ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
-  ctx.strokeStyle = '#3a5a8c';
-  ctx.lineWidth = 1.5;
+  const w = br.x - tl.x, h = br.y - tl.y;
+
+  ctx.fillStyle = p.felt;
+  ctx.fillRect(tl.x, tl.y, w, h);
+
+  // grid every 6"
+  ctx.strokeStyle = p.grid;
+  ctx.lineWidth = 1;
   ctx.setLineDash([]);
-  ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+  ctx.beginPath();
+  for (let x = 6; x < BOARD.w; x += 6) {
+    const sx = w2s(x, 0).x;
+    ctx.moveTo(sx, tl.y); ctx.lineTo(sx, br.y);
+  }
+  for (let y = 6; y < BOARD.h; y += 6) {
+    const sy = w2s(0, y).y;
+    ctx.moveTo(tl.x, sy); ctx.lineTo(br.x, sy);
+  }
+  ctx.stroke();
+
+  ctx.strokeStyle = p.feltEdge;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(tl.x, tl.y, w, h);
 }
 
 function drawZone(z, label, color) {
+  const p = pal();
   const tl = w2s(z.x, z.y);
   const br = w2s(z.x + z.w, z.y + z.h);
   const w = br.x - tl.x, h = br.y - tl.y;
 
-  ctx.fillStyle = hexA(color, 0.05);
+  ctx.fillStyle = p.reserve;
   ctx.fillRect(tl.x, tl.y, w, h);
-  ctx.strokeStyle = hexA(color, 0.28);
+  ctx.strokeStyle = p.reserveEdge;
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 4]);
   ctx.strokeRect(tl.x, tl.y, w, h);
   ctx.setLineDash([]);
 
-  ctx.fillStyle = hexA(color, 0.40);
-  ctx.font = `600 ${Math.max(9, 10 * camera.zoom)}px 'Segoe UI', sans-serif`;
+  ctx.fillStyle = withAlpha(color, 0.55);
+  ctx.font = `600 ${Math.max(9, 10 * camera.zoom)}px ${p.fontUi}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   ctx.fillText(label, tl.x + 6, tl.y + 5);
@@ -160,10 +195,10 @@ function drawRecentLines() {
 
     const pa = w2s(a.x, a.y), pb = w2s(b.x, b.y);
     const color = ev.type === 'charge'
-      ? (ev.success ? '#81c784' : '#5a6b8c')
-      : (Battle.EFFECT_META[ev.effect]?.color ?? '#8892a4');
+      ? (ev.success ? pal().effect.light : pal().effect.whiff)
+      : effectColor(ev.effect);
 
-    ctx.strokeStyle = hexA(color, 0.5);
+    ctx.strokeStyle = withAlpha(color, 0.55);
     ctx.lineWidth = ev.type === 'charge' ? 2 : 1.5;
     ctx.setLineDash(ev.type === 'charge' ? [] : [5, 4]);
     ctx.beginPath();
@@ -183,17 +218,22 @@ function drawUnit(u) {
   const r = (u.def.size / 2) * camera.zoom * PX_PER_INCH;
   const destroyed = u.status === 'destroyed';
 
+  const P = pal();
+  const unitColor = u.def.kind === 'unit'
+    ? (u.def.side === 'B' ? P.sideB : P.sideA)
+    : u.def.kind === 'objective' ? P.objective : P.terrain;
+
   ctx.globalAlpha = destroyed ? 0.28 : 1;
 
   if (u.def.kind === 'terrain') {
-    ctx.fillStyle = hexA(u.def.color, 0.35);
-    ctx.strokeStyle = hexA(u.def.color, 0.8);
+    ctx.fillStyle = P.terrain;
+    ctx.strokeStyle = P.terrainEdge;
     ctx.lineWidth = 1;
     roundRect(ctx, p.x - r, p.y - r, r * 2, r * 2, 4);
     ctx.fill(); ctx.stroke();
   } else if (u.def.kind === 'objective') {
-    ctx.fillStyle = hexA(u.def.color, 0.25);
-    ctx.strokeStyle = u.def.color;
+    ctx.fillStyle = withAlpha(P.objective, 0.18);
+    ctx.strokeStyle = P.objective;
     ctx.lineWidth = 1.5;
     ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
@@ -201,8 +241,19 @@ function drawUnit(u) {
     ctx.setLineDash([]);
   } else {
     // unit: filled disc with a strength arc
-    ctx.fillStyle = u.def.color;
+    if (P.glowBoard && !destroyed) {
+      ctx.shadowColor = unitColor;
+      ctx.shadowBlur = Math.max(6, r * 0.9);
+    }
+    ctx.fillStyle = unitColor;
     ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+
+    if (P.tokenStroke !== 'none') {
+      ctx.strokeStyle = P.tokenStroke;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.stroke();
+    }
 
     const frac = u.def.startingStrength
       ? Math.max(0, Math.min(1, u.strength / u.def.startingStrength)) : 1;
@@ -220,7 +271,7 @@ function drawUnit(u) {
       ctx.stroke();
     }
     if (destroyed) {
-      ctx.strokeStyle = '#e94560';
+      ctx.strokeStyle = P.effect.wiped;
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(p.x - r * 0.6, p.y - r * 0.6); ctx.lineTo(p.x + r * 0.6, p.y + r * 0.6);
@@ -235,8 +286,8 @@ function drawUnit(u) {
   const heldBy   = locks.get(u.id);
 
   if (isActor || isTarget || heldBy) {
-    ctx.strokeStyle = isActor ? '#fff' : isTarget ? '#ffb74d'
-                    : players.get(heldBy)?.color ?? '#fff';
+    ctx.strokeStyle = isActor ? P.text : isTarget ? P.effect.moderate
+                    : players.get(heldBy)?.color ?? P.text;
     ctx.lineWidth = 2.5;
     ctx.setLineDash(isTarget ? [4, 3] : []);
     ctx.beginPath(); ctx.arc(p.x, p.y, r + 3, 0, Math.PI * 2); ctx.stroke();
@@ -244,7 +295,7 @@ function drawUnit(u) {
   }
 
   if (u.battleShocked && !destroyed) {
-    ctx.fillStyle = '#ffb74d';
+    ctx.fillStyle = P.effect.moderate;
     ctx.beginPath(); ctx.arc(p.x + r * 0.75, p.y - r * 0.75, Math.max(2.5, r * 0.26), 0, Math.PI * 2);
     ctx.fill();
   }
@@ -254,8 +305,8 @@ function drawUnit(u) {
   // label under the token
   const fs = Math.max(8, 9.5 * camera.zoom);
   if (fs >= 7) {
-    ctx.fillStyle = destroyed ? '#5a6b8c' : '#eaeaea';
-    ctx.font = `600 ${fs}px 'Segoe UI', sans-serif`;
+    ctx.fillStyle = destroyed ? P.textMuted : P.boardLabel;
+    ctx.font = `${P.labelWeight} ${fs}px ${P.fontUi}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillText(u.def.name, p.x, p.y + r + 3);
@@ -272,9 +323,29 @@ function roundRect(c, x, y, w, h, r) {
   c.closePath();
 }
 
-function hexA(hex, a) {
-  const n = parseInt(hex.slice(1), 16);
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+// battle.js keeps neutral fallback colours so an exported report renders
+// standalone; the live UI overrides them from the active theme.
+function effectColor(effect) {
+  return pal().effect[effect] ?? Battle.EFFECT_META[effect]?.color ?? pal().textMuted;
+}
+
+// Theme tokens may be hex or already-rgba, so handle both rather than
+// assuming the hex form the old hardcoded palette used.
+function withAlpha(color, a) {
+  const c = String(color).trim();
+  if (c.startsWith('#')) {
+    const hex = c.length === 4
+      ? c.slice(1).split('').map(ch => ch + ch).join('')
+      : c.slice(1, 7);
+    const n = parseInt(hex, 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+  }
+  const m = c.match(/rgba?\(([^)]+)\)/);
+  if (m) {
+    const [r, g, b] = m[1].split(',').map(s => parseFloat(s));
+    return `rgba(${r}, ${g}, ${b}, ${a})`;
+  }
+  return c;
 }
 
 function sideName(s) { return meta.sides?.[s]?.name || `Player ${s}`; }
@@ -484,7 +555,7 @@ function renderEntryBar() {
       bar.appendChild(divider());
       for (const eff of Battle.EFFECTS) {
         const m = Battle.EFFECT_META[eff];
-        const b = btn(m.label, 'effect', () => {
+        const b = btn(m.label, 'effect', () => {   // colour set below from theme
           if (!sel.actorId || !sel.targetId) { toast('Pick both units first'); return; }
           appendEvent({
             type: isShoot ? 'shoot' : 'fight',
@@ -495,7 +566,7 @@ function renderEntryBar() {
           sel.targetId = null;   // keep the actor, clear the target
           renderEntryBar();
         });
-        b.style.setProperty('--effect', m.color);
+        b.style.setProperty('--effect', effectColor(eff));
         bar.appendChild(b);
       }
       break;
@@ -622,7 +693,7 @@ function renderLog() {
   for (const ev of here) {
     const li = document.createElement('li');
     li.className = 'log-item';
-    if (ev.effect) li.style.borderLeftColor = Battle.EFFECT_META[ev.effect].color;
+    if (ev.effect) li.style.borderLeftColor = effectColor(ev.effect);
     li.textContent = describeShort(ev, nameOf);
     ul.appendChild(li);
   }
@@ -744,7 +815,7 @@ function renderReport() {
         const pd = document.createElement('div');
         pd.className = 'report-phase';
         pd.innerHTML = `<h4>${p.label}</h4>` + p.lines.map(l => {
-          const c = l.effect ? Battle.EFFECT_META[l.effect].color : null;
+          const c = l.effect ? effectColor(l.effect) : null;
           return `<div class="report-line"${c ? ` style="border-left-color:${c}"` : ''}>${esc(l.text)}</div>`;
         }).join('');
         td.appendChild(pd);
@@ -1081,13 +1152,17 @@ async function loadBattleList() {
   }
 }
 
-document.getElementById('btn-signout').addEventListener('click', async () => {
+async function signOut() {
   await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
   authState = { signedIn: false, enabled: authState.enabled, clientId: authState.clientId };
   googleMounted = false;
   document.getElementById('google-btn').innerHTML = '';
   renderAccount();
-});
+  renderDrawerAccount();
+  toast('Signed out');
+}
+
+document.getElementById('btn-signout').addEventListener('click', signOut);
 
 // Fetched up front so the home screen knows whether saving is even possible.
 (async function initAccount() {
@@ -1106,6 +1181,10 @@ document.getElementById('btn-signout').addEventListener('click', async () => {
     setTimeout(() => mountGoogleButton(authState.clientId), 600);
   }
 })();
+
+// First visit: ask which ops room before anything else.
+if (!Theme.hasChosenTheme()) showThemePicker();
+renderThemeControls();
 
 function renderSaveState(persisted) {
   const el = document.getElementById('save-state');
@@ -1158,6 +1237,118 @@ function submitUnit() {
 function appendEvent(ev) { emit('log:append', ev); }
 
 document.getElementById('btn-undo').addEventListener('click', () => emit('log:undo'));
+
+// ── Theme: first-run chooser + settings drawer ─────────────────────────────
+
+// The canvas caches resolved tokens, so any theme or orientation change has
+// to invalidate it and refit — otherwise the board keeps the old palette.
+Theme.onThemeChange(() => {
+  PAL = null;
+  applyOrientation();
+  if (!document.getElementById('screen-battle').classList.contains('hidden')) {
+    resizeCanvas(); fitCamera();
+  }
+  renderThemeControls();
+  if (roster.length || log.length) renderAll();
+});
+
+function showThemePicker() {
+  const grid = document.getElementById('theme-grid');
+  grid.innerHTML = '';
+  for (const t of Theme.THEMES) {
+    const card = document.createElement('button');
+    card.className = 'theme-card';
+    card.innerHTML = `
+      <span class="tc-preview">${t.swatch.map(c =>
+        `<span style="background:${c}"></span>`).join('')}</span>
+      <span class="tc-body">
+        <span class="tc-name">${esc(t.name)}</span>
+        <span class="tc-era">${esc(t.era)}</span>
+        <span class="tc-blurb">${esc(t.blurb)}</span>
+      </span>`;
+    // preview on hover so the choice is felt rather than guessed
+    card.addEventListener('mouseenter', () => Theme.applyTheme(t.id, { persist: false }));
+    card.addEventListener('click', () => {
+      Theme.applyTheme(t.id);
+      document.getElementById('theme-picker').classList.add('hidden');
+    });
+    grid.appendChild(card);
+  }
+  grid.addEventListener('mouseleave', () => Theme.applyTheme(Theme.currentTheme(), { persist: false }));
+  document.getElementById('theme-picker').classList.remove('hidden');
+}
+
+function renderThemeControls() {
+  const rows = document.getElementById('theme-rows');
+  if (rows) {
+    rows.innerHTML = '';
+    for (const t of Theme.THEMES) {
+      const b = document.createElement('button');
+      b.className = 'theme-row' + (t.id === Theme.currentTheme() ? ' sel' : '');
+      b.innerHTML = `
+        <span class="sw">${t.swatch.map(c => `<span style="background:${c}"></span>`).join('')}</span>
+        <span class="tx"><b>${esc(t.name)}</b><i>${esc(t.era)}</i></span>`;
+      b.addEventListener('click', () => Theme.applyTheme(t.id));
+      rows.appendChild(b);
+    }
+  }
+  document.querySelectorAll('#orient-seg button').forEach(b =>
+    b.classList.toggle('on', b.dataset.orient === Theme.boardOrientation()));
+  renderDrawerAccount();
+}
+
+function renderDrawerAccount() {
+  const el = document.getElementById('drawer-account');
+  if (!el) return;
+  if (authState.signedIn) {
+    el.innerHTML = `
+      <div class="acct-line">
+        ${authState.picture ? `<img src="${esc(authState.picture)}" alt="" />` : ''}
+        <span>${esc(authState.email ?? '')}</span>
+      </div>`;
+    const out = document.createElement('button');
+    out.className = 'btn-ghost';
+    out.style.width = '100%';
+    out.textContent = 'Sign out';
+    out.addEventListener('click', signOut);
+    el.appendChild(out);
+  } else if (authState.enabled) {
+    el.innerHTML = `<p class="drawer-note" style="margin-top:0">
+      Not signed in — battles are not being saved. Sign in from the home screen.</p>`;
+  } else {
+    el.innerHTML = `<p class="drawer-note" style="margin-top:0">
+      Sign-in is not configured on this server, so battles cannot be saved.
+      Use Export JSON to keep a copy.</p>`;
+  }
+}
+
+document.querySelectorAll('.settings-open').forEach(b =>
+  b.addEventListener('click', () => {
+    renderThemeControls();
+    const inBattle = !document.getElementById('screen-battle').classList.contains('hidden')
+                  || !document.getElementById('screen-report').classList.contains('hidden');
+    document.getElementById('drawer-export').classList.toggle('hidden', !inBattle);
+    document.getElementById('drawer-leave').classList.toggle('hidden', !inBattle);
+    document.getElementById('settings-drawer').classList.remove('hidden');
+  }));
+
+document.getElementById('settings-close').addEventListener('click', closeSettings);
+document.getElementById('settings-drawer').addEventListener('click', (e) => {
+  if (e.target.id === 'settings-drawer') closeSettings();   // click the scrim
+});
+function closeSettings() {
+  document.getElementById('settings-drawer').classList.add('hidden');
+}
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeSettings();
+});
+
+document.querySelectorAll('#orient-seg button').forEach(b =>
+  b.addEventListener('click', () => Theme.setBoardOrientation(b.dataset.orient)));
+
+document.getElementById('drawer-leave').addEventListener('click', () => location.reload());
+document.getElementById('drawer-export').addEventListener('click',
+  () => document.getElementById('btn-export-json').click());
 
 // ── Toast ──────────────────────────────────────────────────────────────────
 let toastTimer = null;
