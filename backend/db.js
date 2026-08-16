@@ -23,10 +23,21 @@ const { Pool } = require('pg');
 
 const enabled = !!process.env.DATABASE_URL;
 
+// Managed providers (Render, Neon, Supabase) require TLS and present certs
+// that will not chain locally; a local Postgres usually offers no TLS at all
+// and errors if asked. Detect rather than make the operator configure it.
+function sslSetting() {
+  if (process.env.PGSSL === 'disable') return false;
+  if (process.env.PGSSL === 'require')  return { rejectUnauthorized: false };
+  const url = process.env.DATABASE_URL || '';
+  const isLocal = /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
+  return isLocal ? false : { rejectUnauthorized: false };
+}
+
 const pool = enabled
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: process.env.PGSSL === 'disable' ? false : { rejectUnauthorized: false },
+      ssl: sslSetting(),
       max: 8,
     })
   : null;
