@@ -95,11 +95,13 @@ CREATE TABLE IF NOT EXISTS battle_units (
   starting_strength INTEGER NOT NULL DEFAULT 0,
   size              REAL NOT NULL DEFAULT 2,
   color             TEXT,
-  points            INTEGER NOT NULL DEFAULT 0
+  points            INTEGER NOT NULL DEFAULT 0,
+  attached_to       TEXT
 );
--- Migration for databases created before the points column existed.
+-- Migrations for databases created before these columns existed.
 -- CREATE TABLE IF NOT EXISTS skips existing tables, so new columns need this.
 ALTER TABLE battle_units ADD COLUMN IF NOT EXISTS points INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE battle_units ADD COLUMN IF NOT EXISTS attached_to TEXT;
 CREATE INDEX IF NOT EXISTS battle_units_battle_idx  ON battle_units(battle_id);
 CREATE INDEX IF NOT EXISTS battle_units_catalog_idx ON battle_units(catalog_id);
 
@@ -249,7 +251,12 @@ async function insertUnit(battleId, unit, faction) {
 }
 
 async function deleteUnit(unitId) {
+  await query(`UPDATE battle_units SET attached_to = NULL WHERE attached_to = $1`, [unitId]);
   await query(`DELETE FROM battle_units WHERE id = $1`, [unitId]);
+}
+
+async function setUnitAttachment(leaderId, bodyId) {
+  await query(`UPDATE battle_units SET attached_to = $2 WHERE id = $1`, [leaderId, bodyId]);
 }
 
 const EFFECT_VALUE = { whiff: 0, light: 0.10, moderate: 0.33, heavy: 0.66, wiped: 1 };
@@ -329,6 +336,7 @@ async function loadBattle(token) {
     roster: units.map(u => ({
       id: u.id, name: u.name, catalogName: u.catalog_name || u.name,
       side: u.side, kind: u.kind, points: u.points ?? 0,
+      attachedTo: u.attached_to ?? null,
       startingStrength: u.starting_strength, size: u.size, color: u.color,
     })),
     log: events.map(rowToEvent),
@@ -363,7 +371,7 @@ module.exports = {
   upsertUser,
   normName, resolveCatalogId,
   createBattleRow, updateBattleMeta, claimBattle,
-  insertUnit, deleteUnit,
+  insertUnit, deleteUnit, setUnitAttachment,
   insertEvent, deleteEventBySeq,
   listBattles, loadBattle,
 };

@@ -228,6 +228,7 @@ function addUnit(battle, { name, catalogName, points, side, kind = 'unit',
     // or a nickname still group with their datasheet in cross-battle stats.
     catalogName: (catalogName ?? '').toString().trim().slice(0, 60) || display,
     points: Number.isFinite(+points) ? Math.max(0, Math.floor(+points)) : 0,
+    attachedTo: null,      // set via attachUnit once both ids exist
     side:  resolvedSide,
     kind,
     startingStrength: Number.isFinite(+startingStrength)
@@ -250,7 +251,33 @@ function defaultName(kind) {
 
 function removeUnit(battle, unitId) {
   battle.locks.delete(unitId);
+  // anything led by this unit is orphaned, not silently pointing at nothing
+  for (const u of battle.roster.values()) {
+    if (u.attachedTo === unitId) u.attachedTo = null;
+  }
   return battle.roster.delete(unitId);
+}
+
+// Leader joins a bodyguard unit (40k "Leader"). Pass bodyId = null to detach.
+// Returns the updated leader, or null when the pairing is not allowed.
+function attachUnit(battle, leaderId, bodyId) {
+  const leader = battle.roster.get(leaderId);
+  if (!leader || leader.kind !== 'unit') return null;
+
+  if (bodyId == null) { leader.attachedTo = null; return leader; }
+
+  const body = battle.roster.get(bodyId);
+  if (!body || body.kind !== 'unit') return null;
+  if (body.id === leader.id) return null;
+  if (body.side !== leader.side) return null;
+  // a bodyguard cannot itself be attached, which would make a chain
+  if (body.attachedTo) return null;
+  // nor can a unit that is already leading others become a follower
+  for (const u of battle.roster.values()) {
+    if (u.attachedTo === leader.id) return null;
+  }
+  leader.attachedTo = bodyId;
+  return leader;
 }
 
 // --- log (AD-7) ----------------------------------------------------------
@@ -415,7 +442,7 @@ module.exports = {
   createBattle, getBattle, adoptBattle, battleForSocket, sweepEmptyBattles,
   addPlayer, removePlayer, renamePlayer,
   setMeta,
-  addUnit, removeUnit,
+  addUnit, removeUnit, attachUnit,
   appendEvent, undoLast,
   setCursor, stepCursor,
   grabUnit, releaseUnit,

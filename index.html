@@ -100,7 +100,7 @@
         <div class="ctx-item" data-action="deploy">Deploy here</div>
         <div class="ctx-item" data-action="destroy" id="ctx-destroy">Mark destroyed</div>
         <hr class="ctx-sep" />
-        <div class="ctx-item" data-action="remove-unit" id="ctx-remove">Remove from roster</div>
+        <div class="ctx-item" data-action="remove-unit" id="ctx-remove">Remove from list</div>
       </div>
     </div>
 
@@ -197,6 +197,10 @@
     </div>
   </div>
 </div>
+
+<!-- bodyguard picker (kept separate from the board's context menu, whose
+     children are fixed and looked up by id) -->
+<div id="attach-menu" class="hidden"></div>
 
 <!-- ── Army list import ──────────────────────────────────────────────── -->
 <div id="list-modal" class="hidden modal-backdrop">

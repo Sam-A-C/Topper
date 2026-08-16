@@ -88,7 +88,32 @@ function foldLog(log, roster, upto = Infinity) {
     if (ev.seq > upto) break;
     applyEvent(state, ev);
   }
+  resolveAttachments(state);
   return state;
+}
+
+// A leader attached to a bodyguard occupies the same space and moves with it,
+// so its position is derived rather than logged. If the bodyguard dies the
+// leader is left on its own — it keeps the last shared position and becomes
+// an independent unit from that point, which is what happens on the table.
+function resolveAttachments(state) {
+  for (const u of state.values()) {
+    const bodyId = u.def.attachedTo;
+    if (!bodyId) { u.attachedTo = null; u.leaders = u.leaders ?? []; continue; }
+
+    const body = state.get(bodyId);
+    if (!body || body.status === 'destroyed') {
+      u.attachedTo = null;                       // bodyguard gone — on its own
+      if (body && u.x === null) { u.x = body.x; u.y = body.y; u.deployed = body.deployed; }
+      continue;
+    }
+    u.attachedTo = bodyId;
+    u.x = body.x; u.y = body.y;
+    u.deployed = body.deployed;
+    if (u.status !== 'destroyed') u.status = body.status;
+    (body.leaders ??= []).push(u.id);
+  }
+  for (const u of state.values()) u.leaders ??= [];
 }
 
 function applyEvent(state, ev) {

@@ -83,9 +83,21 @@ function parseWarOrgan(text) {
   const lines = text.split(/\r?\n/);
   const head = new RegExp(String.raw`^\s{1,3}(\S.*?)\s*${POINTS}\s*$`, 'i');
   const units = [];
+  let section = null;      // current unindented header
+  let block = -1;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+
+    // Unindented, no points: a section header. WarOrgan names an attachment
+    // group after its bodyguard unit ("Genestealers"), while plain category
+    // headers ("Monster", "Other") match nothing in the section — that
+    // difference is the only signal that a group is attached.
+    if (line.trim() && !/^\s/.test(line) && !/points?\)/i.test(line) && !SKIP.test(line.trim())) {
+      section = line.trim();
+      block++;
+      continue;
+    }
     if (line.includes('•') || SKIP.test(line.trim())) continue;
     const m = line.match(head);
     if (!m) continue;
@@ -100,9 +112,31 @@ function parseWarOrgan(text) {
       const c = sub.match(/^\s*•\s*(\d+)\s+\S.*?\s+with\s+/i);
       if (c) { models = +c[1]; break; }
     }
-    units.push(makeUnit(cleanName(m[1]), models, +m[2]));
+    const u = makeUnit(cleanName(m[1]), models, +m[2]);
+    u._block = block;
+    u._section = section;
+    units.push(u);
   }
-  return units;
+
+  // Only groups whose header names one of their own units are attachments.
+  const byBlock = new Map();
+  for (const u of units) {
+    if (!byBlock.has(u._block)) byBlock.set(u._block, []);
+    byBlock.get(u._block).push(u);
+  }
+  for (const group of byBlock.values()) {
+    if (group.length < 2) continue;
+    const header = normalise(group[0]._section ?? '');
+    if (!group.some(u => normalise(u.catalogName) === header)) {
+      for (const u of group) delete u._block;      // a plain category listing
+    }
+  }
+  for (const u of units) delete u._section;
+  return linkBlocks(units);
+}
+
+function normalise(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 // ── Games Workshop app ───────────────────────────────────────────────────
@@ -121,14 +155,24 @@ function parseGw(text) {
   const head = new RegExp(String.raw`^(\S.*?)\s*${POINTS}\s*$`, 'i');
   const units = [];
   let started = false;
+  let inAttached = false;   // inside the ATTACHED UNITS section
+  let block = null;         // index of the current "Attached Unit N" block
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const t = line.trim();
 
     // the army title also looks like a unit line, so wait for the first
     // ALL-CAPS section header before collecting anything
-    if (/^[A-Z][A-Z\s]{3,}$/.test(line.trim())) { started = true; continue; }
-    if (!started || line.includes('•') || SKIP.test(line.trim())) continue;
+    if (/^[A-Z][A-Z\s]{3,}$/.test(t)) {
+      started = true;
+      inAttached = /^ATTACHED UNITS$/i.test(t);
+      block = null;
+      continue;
+    }
+    // GW brackets each leader+bodyguard pair with its own sub-header
+    if (inAttached && /^Attached Unit\s+\d+/i.test(t)) { block = (block ?? -1) + 1; continue; }
+    if (!started || line.includes('•') || SKIP.test(t)) continue;
 
     const m = line.match(head);
     if (!m) continue;
@@ -148,8 +192,31 @@ function parseGw(text) {
       const nested = next && next.trim().startsWith('•') && indentOf(next) > ind;
       if (nested) models += +c[1];
     }
-    units.push(makeUnit(cleanName(m[1]), models || 1, +m[2]));
+    const u = makeUnit(cleanName(m[1]), models || 1, +m[2]);
+    if (inAttached && block !== null) u._block = block;
+    units.push(u);
   }
+  return linkBlocks(units);
+}
+
+// Turns _block groupings into leader → body links. The leader is the smaller
+// unit (a character joining a squad); ties fall back to listed order, which
+// is how every builder writes them anyway.
+function linkBlocks(units) {
+  const groups = new Map();
+  units.forEach((u, i) => {
+    if (u._block === undefined) return;
+    if (!groups.has(u._block)) groups.set(u._block, []);
+    groups.get(u._block).push(i);
+  });
+
+  for (const idx of groups.values()) {
+    if (idx.length < 2) continue;
+    const bodyIdx = idx.reduce((best, i) =>
+      units[i].models > units[best].models ? i : best, idx[0]);
+    for (const i of idx) if (i !== bodyIdx) units[i].attachedToIndex = bodyIdx;
+  }
+  for (const u of units) delete u._block;
   return units;
 }
 

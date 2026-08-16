@@ -183,6 +183,19 @@ io.on('connection', (socket) => {
     })());
   });
 
+  socket.on('unit:attach', ({ leaderId, bodyId } = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle || !leaderId) return;
+    const leader = bm.attachUnit(battle, leaderId, bodyId ?? null);
+    if (!leader) return socket.emit('battle:rejected', { pending: null });
+    io.to(battle.token).emit('unit:attached',
+      { leaderId, bodyId: leader.attachedTo });
+    persist('attach', (async () => {
+      const id = await ensureRow(battle, socket.data.userId);
+      if (id) await db.setUnitAttachment(leaderId, leader.attachedTo);
+    })());
+  });
+
   socket.on('unit:remove', ({ id } = {}) => {
     const battle = bm.battleForSocket(socket.id);
     if (!battle || !id) return;

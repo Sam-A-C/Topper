@@ -211,6 +211,9 @@ function drawRecentLines() {
 
 function drawUnit(u) {
   if (u.x === null || u.y === null) return;
+  // an attached leader shares its bodyguard's space — the pair draws as one
+  // token with a pip, rather than two discs stacked on the same point
+  if (u.attachedTo) return;
 
   // dragging shows a local preview so the drag feels instant (AD-3)
   const pos = (drag.active && drag.unitId === u.id && drag.preview) ? drag.preview : u;
@@ -294,6 +297,15 @@ function drawUnit(u) {
     ctx.setLineDash([]);
   }
 
+  // a led unit gets a bar across its top edge, one notch per attached leader
+  if (u.leaders?.length && !destroyed) {
+    ctx.strokeStyle = P.boardLabel;
+    ctx.lineWidth = Math.max(1.5, r * 0.16);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r + 3, -Math.PI * 0.78, -Math.PI * 0.22);
+    ctx.stroke();
+  }
+
   if (u.battleShocked && !destroyed) {
     ctx.fillStyle = P.effect.moderate;
     ctx.beginPath(); ctx.arc(p.x + r * 0.75, p.y - r * 0.75, Math.max(2.5, r * 0.26), 0, Math.PI * 2);
@@ -352,7 +364,9 @@ function sideName(s) { return meta.sides?.[s]?.name || `Player ${s}`; }
 
 // ── Hit-testing ────────────────────────────────────────────────────────────
 function hitTest(wx, wy) {
-  const all = [...unitState.values()].filter(u => u.x !== null);
+  // attached leaders are not independently clickable — grabbing the pair
+  // means grabbing the bodyguard
+  const all = [...unitState.values()].filter(u => u.x !== null && !u.attachedTo);
   // units before terrain so a unit standing on a ruin is grabbed first
   all.sort((a, b) => rank(b.def.kind) - rank(a.def.kind));
   for (const u of all) {
@@ -533,8 +547,11 @@ function renderEntryBar() {
   const bar = document.getElementById('entry-bar');
   bar.innerHTML = '';
 
-  const mine   = roster.filter(u => u.kind === 'unit' && u.side === cursor.side);
-  const theirs = roster.filter(u => u.kind === 'unit' && u.side !== cursor.side);
+  // An attached leader fights as part of its bodyguard, so the pair is one
+  // entry — logging "the Broodlord shot" separately would misrepresent it.
+  const free = u => u.kind === 'unit' && !unitState.get(u.id)?.attachedTo;
+  const mine   = roster.filter(u => free(u) && u.side === cursor.side);
+  const theirs = roster.filter(u => free(u) && u.side !== cursor.side);
 
   const alive = list => list.filter(u => unitState.get(u.id)?.status !== 'destroyed');
 
@@ -675,33 +692,98 @@ function divider() {
 function renderRoster() {
   const ul = document.getElementById('roster-list');
   ul.innerHTML = '';
+
+  // Leaders are listed beneath the bodyguard they have joined, so the panel
+  // mirrors what is actually on the table: one entry per fighting unit.
+  const leadersOf = new Map();
+  for (const d of roster) {
+    if (!d.attachedTo) continue;
+    if (!leadersOf.has(d.attachedTo)) leadersOf.set(d.attachedTo, []);
+    leadersOf.get(d.attachedTo).push(d);
+  }
+
   for (const def of roster) {
-    const st = unitState.get(def.id);
-    const li = document.createElement('li');
-    li.className = 'roster-item';
-    if (st?.status === 'destroyed') li.classList.add('dead');
-    if (sel.actorId === def.id || sel.targetId === def.id) li.classList.add('picked');
-
-    const dot = document.createElement('span');
-    dot.className = 'roster-dot';
-    dot.style.background = def.color;
-
-    const name = document.createElement('span');
-    name.className = 'roster-name';
-    name.textContent = def.name;
-
-    const badge = document.createElement('span');
-    badge.className = 'roster-badge';
-    badge.textContent = def.kind !== 'unit' ? def.kind
-      : st?.status === 'destroyed' ? '✕'
-      : st?.deployed ? strengthBadge(st, def)
-      : 'res';
-
-    li.append(dot, name, badge);
-    li.addEventListener('click', () => { if (st) pickForEntry(st); renderRoster(); });
-    ul.appendChild(li);
+    if (def.attachedTo) continue;                 // rendered under its body
+    ul.appendChild(rosterRow(def, false));
+    for (const led of leadersOf.get(def.id) ?? []) ul.appendChild(rosterRow(led, true));
   }
 }
+
+function rosterRow(def, isLed) {
+  const st = unitState.get(def.id);
+  const li = document.createElement('li');
+  li.className = 'roster-item' + (isLed ? ' led' : '');
+  if (st?.status === 'destroyed') li.classList.add('dead');
+  if (sel.actorId === def.id || sel.targetId === def.id) li.classList.add('picked');
+
+  const dot = document.createElement('span');
+  dot.className = 'roster-dot';
+  dot.style.background = def.color;
+
+  const name = document.createElement('span');
+  name.className = 'roster-name';
+  name.textContent = def.name;
+
+  const badge = document.createElement('span');
+  badge.className = 'roster-badge';
+  badge.textContent = def.kind !== 'unit' ? def.kind
+    : st?.status === 'destroyed' ? '✕'
+    : st?.deployed ? strengthBadge(st, def)
+    : 'res';
+
+  li.append(dot, name, badge);
+
+  if (def.kind === 'unit') {
+    const join = document.createElement('button');
+    join.className = 'row-btn';
+    join.textContent = isLed ? '⤫' : '⚯';
+    join.title = isLed ? 'Detach from bodyguard' : 'Attach to a bodyguard';
+    join.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (isLed) emit('unit:attach', { leaderId: def.id, bodyId: null });
+      else openAttachMenu(def, join);
+    });
+    li.appendChild(join);
+  }
+
+  li.addEventListener('click', () => { if (st) pickForEntry(st); renderRoster(); });
+  return li;
+}
+
+// Small inline menu of legal bodyguards — same side, not already led, and
+// not itself leading anything (the server enforces the same rules).
+function openAttachMenu(leader, anchor) {
+  const leading = new Set(roster.filter(u => u.attachedTo).map(u => u.attachedTo));
+  const options = roster.filter(u =>
+    u.kind === 'unit' && u.id !== leader.id && u.side === leader.side &&
+    !u.attachedTo && !leading.has(leader.id));
+
+  const menu = document.getElementById('attach-menu');
+  menu.innerHTML = '';
+  if (!options.length) {
+    const d = document.createElement('div');
+    d.className = 'ctx-item ctx-note';
+    d.textContent = 'No eligible bodyguard';
+    menu.appendChild(d);
+  }
+  for (const o of options) {
+    const d = document.createElement('div');
+    d.className = 'ctx-item';
+    d.textContent = o.name;
+    d.addEventListener('click', (e) => {
+      e.stopPropagation();
+      emit('unit:attach', { leaderId: leader.id, bodyId: o.id });
+      menu.classList.add('hidden');
+    });
+    menu.appendChild(d);
+  }
+  const r = anchor.getBoundingClientRect();
+  menu.style.left = Math.max(8, r.left - 160) + 'px';
+  menu.style.top  = (r.bottom + 4) + 'px';
+  menu.classList.remove('hidden');
+}
+
+window.addEventListener('click', () => document.getElementById('attach-menu').classList.add('hidden'));
 
 // Multi-model units read as models remaining (what you remove from the table);
 // single-model units read as a percentage, where a model count says nothing.
@@ -1369,25 +1451,52 @@ function setParsed(result) {
   confirm.textContent = `Import ${result.units.length} units`;
 }
 
-document.getElementById('list-confirm').addEventListener('click', () => {
+document.getElementById('list-confirm').addEventListener('click', async () => {
   if (!parsed?.ok) return;
-  for (const u of parsed.units) {
+  const list = parsed.units;
+  const base = roster.length;          // ids are minted server-side, so pair
+  const side = importSide;             // them back up by insertion order
+
+  for (const u of list) {
     emit('unit:add', {
       name: u.name,
       catalogName: u.catalogName,
       points: u.points,
-      side: importSide,
+      side,
       kind: 'unit',
       startingStrength: u.models,
     });
   }
-  // Record the faction against the side if we found one and none is set.
-  if (parsed.faction && !meta.sides[importSide]?.faction) {
-    emit('meta:set', { sides: { [importSide]: { faction: parsed.faction } } });
+  if (parsed.faction && !meta.sides[side]?.faction) {
+    emit('meta:set', { sides: { [side]: { faction: parsed.faction } } });
   }
   listModal.classList.add('hidden');
-  toast(`Imported ${parsed.units.length} units for ${sideName(importSide)}`);
+
+  // Attachments can only be applied once every unit has a server id.
+  const links = list.map((u, i) => [i, u.attachedToIndex])
+                    .filter(([, b]) => b !== undefined);
+  if (links.length) {
+    await waitForRoster(base + list.length, 4000);
+    let linked = 0;
+    for (const [leaderI, bodyI] of links) {
+      const leader = roster[base + leaderI], body = roster[base + bodyI];
+      if (leader && body) { emit('unit:attach', { leaderId: leader.id, bodyId: body.id }); linked++; }
+    }
+    toast(`Imported ${list.length} units · ${linked} attached`);
+  } else {
+    toast(`Imported ${list.length} units for ${sideName(side)}`);
+  }
 });
+
+function waitForRoster(size, timeoutMs) {
+  return new Promise(resolve => {
+    const t0 = Date.now();
+    (function poll() {
+      if (roster.length >= size || Date.now() - t0 > timeoutMs) return resolve();
+      setTimeout(poll, 60);
+    })();
+  });
+}
 
 // ── Log helpers ────────────────────────────────────────────────────────────
 function appendEvent(ev) { emit('log:append', ev); }
@@ -1668,8 +1777,15 @@ function wireBattleEvents() {
   on('meta:updated', (m) => { meta = m; renderAll(); });
 
   on('unit:added', (u) => { roster.push(u); renderAll(); });
+  on('unit:attached', ({ leaderId, bodyId }) => {
+    const u = roster.find(x => x.id === leaderId);
+    if (u) u.attachedTo = bodyId;
+    renderAll();
+  });
+
   on('unit:removed', ({ id }) => {
     roster = roster.filter(u => u.id !== id);
+    for (const u of roster) if (u.attachedTo === id) u.attachedTo = null;
     if (sel.actorId  === id) sel.actorId  = null;
     if (sel.targetId === id) sel.targetId = null;
     renderAll();
