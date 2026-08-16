@@ -26,6 +26,31 @@ app.use(auth.attachUser);
 
 auth.routes(app);
 
+// Ops health check. Persistence is fire-and-forget by design, so without
+// this a broken schema would fail silently — every insert erroring into the
+// log while the app looked fine. Counts only; no user data.
+app.get('/api/health', async (_req, res) => {
+  const out = { ok: true, db: { configured: db.enabled } };
+  if (db.enabled) {
+    try {
+      const { rows } = await db.query(`
+        SELECT (SELECT count(*) FROM battles)       AS battles,
+               (SELECT count(*) FROM battle_events) AS events,
+               (SELECT count(*) FROM battle_units)  AS units,
+               (SELECT count(*) FROM unit_catalog)  AS catalog,
+               (SELECT count(*) FROM users)         AS users`);
+      out.db.connected = true;
+      out.db.counts = Object.fromEntries(
+        Object.entries(rows[0]).map(([k, v]) => [k, Number(v)]));
+    } catch (err) {
+      out.ok = false;
+      out.db.connected = false;
+      out.db.error = err.message;
+    }
+  }
+  res.status(out.ok ? 200 : 503).json(out);
+});
+
 app.use(express.static(path.join(__dirname, '..')));
 
 const server = http.createServer(app);

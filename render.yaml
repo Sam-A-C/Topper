@@ -11,7 +11,7 @@ services:
     plan: free
     buildCommand: cd backend && npm install
     startCommand: cd backend && node server.js
-    healthCheckPath: /api/auth/config
+    healthCheckPath: /api/health
     envVars:
       # Wired automatically from the database above — never set by hand.
       - key: DATABASE_URL
@@ -32,7 +32,7 @@ services:
         value: production
 
       - key: CORS_ORIGIN
-        value: "https://topper-g651.onrender.com"
+        value: "https://topper-b4rv.onrender.com"
 
     # PORT is deliberately unset: Render injects it, and server.js falls back
     # to 3000 only when it is absent. Hardcoding it fights the platform.
