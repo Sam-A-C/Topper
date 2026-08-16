@@ -212,16 +212,22 @@ function setMeta(battle, patch = {}) {
 
 // --- roster --------------------------------------------------------------
 
-function addUnit(battle, { name, side, kind = 'unit', startingStrength, size } = {}) {
+function addUnit(battle, { name, catalogName, points, side, kind = 'unit',
+                          startingStrength, size } = {}) {
   const defaults = UNIT_DEFAULTS[kind];
   if (!defaults) throw new Error(`Unknown unit kind: ${kind}`);
 
   // terrain and objectives belong to no side
   const resolvedSide = kind === 'unit' ? (SIDES.includes(side) ? side : 'A') : null;
+  const display = (name ?? '').toString().trim().slice(0, 40) || defaultName(kind);
 
   const unit = {
     id:    uuidv4(),
-    name:  (name ?? '').toString().trim().slice(0, 40) || defaultName(kind),
+    name:  display,
+    // The datasheet name, kept separate so board labels like "Genestealers 2"
+    // or a nickname still group with their datasheet in cross-battle stats.
+    catalogName: (catalogName ?? '').toString().trim().slice(0, 60) || display,
+    points: Number.isFinite(+points) ? Math.max(0, Math.floor(+points)) : 0,
     side:  resolvedSide,
     kind,
     startingStrength: Number.isFinite(+startingStrength)

@@ -374,13 +374,38 @@ canvas.addEventListener('wheel', (e) => {
   camera.y = wy - e.offsetY / (camera.zoom * PX_PER_INCH);
 }, { passive: false });
 
+// Panning: middle-button anywhere, or left-drag on empty board. A left press
+// on empty space is ambiguous until the mouse moves, so the deselect is
+// deferred to mouseup and only fires if this turned out to be a click.
+const pan = { active: false, sx: 0, sy: 0, camX: 0, camY: 0, moved: false, deselect: false };
+
+function startPan(e, deselect) {
+  pan.active = true;
+  pan.sx = e.clientX; pan.sy = e.clientY;
+  pan.camX = camera.x; pan.camY = camera.y;
+  pan.moved = false;
+  pan.deselect = !!deselect;
+  canvas.style.cursor = 'grabbing';
+}
+
+function endPan() {
+  if (!pan.active) return;
+  if (!pan.moved && pan.deselect) {
+    sel.actorId = null; sel.targetId = null;
+    renderEntryBar(); renderRoster();
+  }
+  pan.active = false;
+  canvas.style.cursor = '';
+}
+
 canvas.addEventListener('mousedown', (e) => {
+  if (e.button === 1) { e.preventDefault(); hideContextMenu(); startPan(e, false); return; }
   if (e.button !== 0) return;
   hideContextMenu();
   const { x: wx, y: wy } = s2w(e.offsetX, e.offsetY);
   const u = hitTest(wx, wy);
 
-  if (!u) { sel.actorId = null; sel.targetId = null; renderEntryBar(); return; }
+  if (!u) { startPan(e, true); return; }
 
   if (cursor.phase === 'movement') {
     drag.pending = u.id;
@@ -394,14 +419,26 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 canvas.addEventListener('mousemove', (e) => {
+  if (pan.active) {
+    const dx = e.clientX - pan.sx, dy = e.clientY - pan.sy;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) pan.moved = true;
+    const scale = camera.zoom * PX_PER_INCH;
+    camera.x = pan.camX - dx / scale;
+    camera.y = pan.camY - dy / scale;
+    return;
+  }
   if (!drag.active) return;
   const { x: wx, y: wy } = s2w(e.offsetX, e.offsetY);
   drag.preview = { x: wx - drag.offsetX, y: wy - drag.offsetY };
   emit('unit:drag', { id: drag.unitId, x: drag.preview.x, y: drag.preview.y });
 });
 
-canvas.addEventListener('mouseup', () => finishDrag());
-canvas.addEventListener('mouseleave', () => finishDrag());
+canvas.addEventListener('mouseup', () => { endPan(); finishDrag(); });
+canvas.addEventListener('mouseleave', () => { endPan(); finishDrag(); });
+// A drag often ends outside the canvas; without this the board would stay
+// stuck to the cursor after releasing over the sidebar.
+window.addEventListener('mouseup', () => { endPan(); });
+canvas.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 
 // On release the drag becomes an event — the log is the only write path.
 function finishDrag() {
@@ -1232,6 +1269,125 @@ function submitUnit() {
   });
   unitModal.classList.add('hidden');
 }
+
+// ── Army list import ───────────────────────────────────────────────────────
+
+const listModal = document.getElementById('list-modal');
+let importSide = 'A';
+let parsed = null;
+
+document.getElementById('btn-import-list').addEventListener('click', () => {
+  importSide = cursor.side;              // default to whoever's turn it is
+  document.getElementById('list-text').value = '';
+  document.getElementById('list-status').textContent = '';
+  setParsed(null);
+  renderImportSides();
+  listModal.classList.remove('hidden');
+  document.getElementById('list-text').focus();
+});
+
+function renderImportSides() {
+  document.getElementById('import-side-a').textContent = sideName('A');
+  document.getElementById('import-side-b').textContent = sideName('B');
+  document.querySelectorAll('#import-side button').forEach(b =>
+    b.classList.toggle('on', b.dataset.side === importSide));
+}
+
+document.querySelectorAll('#import-side button').forEach(b =>
+  b.addEventListener('click', () => { importSide = b.dataset.side; renderImportSides(); }));
+
+document.getElementById('list-cancel').addEventListener('click',
+  () => listModal.classList.add('hidden'));
+
+document.getElementById('btn-list-file').addEventListener('click',
+  () => document.getElementById('list-file').click());
+
+document.getElementById('list-file').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  const text = await file.text();
+  document.getElementById('list-text').value = text;
+  document.getElementById('list-status').textContent = file.name;
+  reparse();
+});
+
+let parseTimer = null;
+document.getElementById('list-text').addEventListener('input', () => {
+  clearTimeout(parseTimer);
+  parseTimer = setTimeout(reparse, 180);   // parse as you paste
+});
+
+function reparse() {
+  const text = document.getElementById('list-text').value;
+  setParsed(text.trim() ? ListParser.parseList(text) : null);
+}
+
+// Nothing is added until the preview is confirmed — an army list is a lot of
+// units to undo one at a time if the parse went wrong.
+function setParsed(result) {
+  parsed = result;
+  const box  = document.getElementById('list-preview');
+  const ul   = document.getElementById('preview-list');
+  const warn = document.getElementById('preview-warn');
+  const confirm = document.getElementById('list-confirm');
+
+  if (!result) {
+    box.classList.add('hidden');
+    confirm.disabled = true;
+    confirm.textContent = 'Import';
+    return;
+  }
+
+  box.classList.remove('hidden');
+  document.getElementById('preview-format').textContent = result.formatLabel;
+
+  if (!result.ok) {
+    ul.innerHTML = `<li class="preview-empty">${esc(result.error)}</li>`;
+    document.getElementById('preview-summary').textContent = 'Could not read this list';
+    warn.classList.add('hidden');
+    confirm.disabled = true;
+    return;
+  }
+
+  const bits = [`${result.units.length} units`];
+  if (result.totalPoints) bits.push(`${result.totalPoints} pts`);
+  if (result.faction)     bits.push(result.faction);
+  document.getElementById('preview-summary').textContent = bits.join(' · ');
+
+  ul.innerHTML = result.units.map(u => `
+    <li class="preview-item">
+      <span class="pi-name">${esc(u.name)}</span>
+      <span class="pi-models">${u.models > 1 ? u.models + ' models' : '1 model'}</span>
+      <span class="pi-pts">${u.points || ''}</span>
+    </li>`).join('');
+
+  warn.classList.toggle('hidden', !result.warnings.length);
+  warn.textContent = result.warnings.join(' ');
+
+  confirm.disabled = false;
+  confirm.textContent = `Import ${result.units.length} units`;
+}
+
+document.getElementById('list-confirm').addEventListener('click', () => {
+  if (!parsed?.ok) return;
+  for (const u of parsed.units) {
+    emit('unit:add', {
+      name: u.name,
+      catalogName: u.catalogName,
+      points: u.points,
+      side: importSide,
+      kind: 'unit',
+      startingStrength: u.models,
+    });
+  }
+  // Record the faction against the side if we found one and none is set.
+  if (parsed.faction && !meta.sides[importSide]?.faction) {
+    emit('meta:set', { sides: { [importSide]: { faction: parsed.faction } } });
+  }
+  listModal.classList.add('hidden');
+  toast(`Imported ${parsed.units.length} units for ${sideName(importSide)}`);
+});
 
 // ── Log helpers ────────────────────────────────────────────────────────────
 function appendEvent(ev) { emit('log:append', ev); }

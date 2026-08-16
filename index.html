@@ -120,8 +120,11 @@
 
       <div class="sidebar-section">
         <h3>
-          Roster
-          <button id="btn-add-unit" class="mini-btn" title="Add unit">+</button>
+          List
+          <span class="h3-actions">
+            <button id="btn-import-list" class="mini-btn" title="Import an army list">⇪</button>
+            <button id="btn-add-unit" class="mini-btn" title="Add a single unit">+</button>
+          </span>
         </h3>
         <ul id="roster-list"></ul>
       </div>
@@ -195,6 +198,47 @@
   </div>
 </div>
 
+<!-- ── Army list import ──────────────────────────────────────────────── -->
+<div id="list-modal" class="hidden modal-backdrop">
+  <div class="modal-box wide">
+    <p class="modal-title">Import an army list</p>
+
+    <div class="field">
+      <span>Add to</span>
+      <div class="seg" id="import-side">
+        <button data-side="A"><span class="side-swatch a"></span><span id="import-side-a">Player A</span></button>
+        <button data-side="B"><span class="side-swatch b"></span><span id="import-side-b">Player B</span></button>
+      </div>
+    </div>
+
+    <div class="field">
+      <span>Paste the list</span>
+      <textarea id="list-text" rows="9" spellcheck="false"
+        placeholder="Paste from the GW app, WTC, WarOrgan…"></textarea>
+    </div>
+
+    <div class="import-row">
+      <button id="btn-list-file" class="btn-ghost">Choose a file…</button>
+      <input id="list-file" type="file" accept=".txt,.text,text/plain" class="hidden" />
+      <span id="list-status" class="import-status"></span>
+    </div>
+
+    <div id="list-preview" class="hidden">
+      <div class="preview-head">
+        <span id="preview-summary"></span>
+        <span id="preview-format" class="preview-format"></span>
+      </div>
+      <ul id="preview-list"></ul>
+      <p id="preview-warn" class="drawer-note hidden"></p>
+    </div>
+
+    <div class="modal-actions">
+      <button id="list-cancel" class="btn-ghost">Cancel</button>
+      <button id="list-confirm" class="btn-accent" disabled>Import</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── First-run theme chooser ───────────────────────────────────────── -->
 <div id="theme-picker" class="hidden modal-backdrop">
   <div class="modal-box">
@@ -252,6 +296,7 @@
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="/socket.io/socket.io.js"></script>
 <script src="theme.js"></script>
+<script src="listParser.js"></script>
 <script src="socket-client.js"></script>
 <script src="battle.js"></script>
 <script src="app.js"></script>

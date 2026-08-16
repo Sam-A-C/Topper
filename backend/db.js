@@ -94,8 +94,12 @@ CREATE TABLE IF NOT EXISTS battle_units (
   kind              TEXT NOT NULL,
   starting_strength INTEGER NOT NULL DEFAULT 0,
   size              REAL NOT NULL DEFAULT 2,
-  color             TEXT
+  color             TEXT,
+  points            INTEGER NOT NULL DEFAULT 0
 );
+-- Migration for databases created before the points column existed.
+-- CREATE TABLE IF NOT EXISTS skips existing tables, so new columns need this.
+ALTER TABLE battle_units ADD COLUMN IF NOT EXISTS points INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS battle_units_battle_idx  ON battle_units(battle_id);
 CREATE INDEX IF NOT EXISTS battle_units_catalog_idx ON battle_units(catalog_id);
 
@@ -230,15 +234,18 @@ async function claimBattle(battleId, ownerId) {
 }
 
 async function insertUnit(battleId, unit, faction) {
+  // Catalogue on the DATASHEET name, never the board label — otherwise
+  // "Genestealers 1" and "Genestealers 2" become two different units and
+  // every cross-battle aggregate silently splits.
   const catalogId = unit.kind === 'unit'
-    ? await resolveCatalogId(unit.name, faction) : null;
+    ? await resolveCatalogId(unit.catalogName || unit.name, faction) : null;
   await query(`
     INSERT INTO battle_units (id, battle_id, catalog_id, name, side, kind,
-                              starting_strength, size, color)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                              starting_strength, size, color, points)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
     ON CONFLICT (id) DO NOTHING`,
     [unit.id, battleId, catalogId, unit.name, unit.side, unit.kind,
-     unit.startingStrength, unit.size, unit.color]);
+     unit.startingStrength, unit.size, unit.color, unit.points ?? 0]);
 }
 
 async function deleteUnit(unitId) {
@@ -300,7 +307,10 @@ async function loadBattle(token) {
   if (!b) return null;
 
   const { rows: units } = await query(
-    `SELECT * FROM battle_units WHERE battle_id = $1`, [b.id]);
+    `SELECT bu.*, uc.display_name AS catalog_name
+     FROM battle_units bu
+     LEFT JOIN unit_catalog uc ON uc.id = bu.catalog_id
+     WHERE bu.battle_id = $1`, [b.id]);
   const { rows: events } = await query(
     `SELECT * FROM battle_events WHERE battle_id = $1 ORDER BY seq`, [b.id]);
 
@@ -317,7 +327,8 @@ async function loadBattle(token) {
       },
     },
     roster: units.map(u => ({
-      id: u.id, name: u.name, side: u.side, kind: u.kind,
+      id: u.id, name: u.name, catalogName: u.catalog_name || u.name,
+      side: u.side, kind: u.kind, points: u.points ?? 0,
       startingStrength: u.starting_strength, size: u.size, color: u.color,
     })),
     log: events.map(rowToEvent),
