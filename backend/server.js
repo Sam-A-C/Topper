@@ -2,13 +2,13 @@
 
 require('dotenv').config();
 
-const express  = require('express');
-const http     = require('http');
+const express    = require('express');
+const http       = require('http');
 const { Server } = require('socket.io');
-const cors     = require('cors');
-const path     = require('path');
+const cors       = require('cors');
+const path       = require('path');
 
-const lm = require('./lobbyManager');
+const bm = require('./lobbyManager');
 
 const PORT        = process.env.PORT        || 3000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
@@ -17,8 +17,6 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
-
-// Serve frontend from project root (one level up)
 app.use(express.static(path.join(__dirname, '..')));
 
 const server = http.createServer(app);
@@ -31,25 +29,24 @@ const io = new Server(server, {
 
 io.on('connection', (socket) => {
   // -----------------------------------------------------------------------
-  // Lobby lifecycle
+  // Battle lifecycle
   // -----------------------------------------------------------------------
 
-  socket.on('lobby:start', () => {
-    const lobby  = lm.createLobby();
-    const player = lm.addPlayer(lobby, socket.id);
-    socket.join(lobby.token);
-    socket.emit('lobby:state', lm.lobbySnapshot(lobby, socket.id));
-    // no playerJoined broadcast — first player, nobody else to notify
+  socket.on('battle:start', () => {
+    const battle = bm.createBattle();
+    bm.addPlayer(battle, socket.id);
+    socket.join(battle.token);
+    socket.emit('battle:state', bm.battleSnapshot(battle, socket.id));
   });
 
-  socket.on('lobby:join', ({ token } = {}) => {
-    if (!token) return socket.emit('lobby:error', { message: 'Token required.' });
-    const lobby = lm.getLobby(String(token).toUpperCase());
-    if (!lobby) return socket.emit('lobby:error', { message: 'Lobby not found.' });
-    const player = lm.addPlayer(lobby, socket.id);
-    socket.join(lobby.token);
-    socket.emit('lobby:state', lm.lobbySnapshot(lobby, socket.id));
-    socket.to(lobby.token).emit('lobby:playerJoined', {
+  socket.on('battle:join', ({ token } = {}) => {
+    if (!token) return socket.emit('battle:error', { message: 'Token required.' });
+    const battle = bm.getBattle(String(token).toUpperCase());
+    if (!battle) return socket.emit('battle:error', { message: 'Battle not found.' });
+    const player = bm.addPlayer(battle, socket.id);
+    socket.join(battle.token);
+    socket.emit('battle:state', bm.battleSnapshot(battle, socket.id));
+    socket.to(battle.token).emit('lobby:playerJoined', {
       socketId: socket.id,
       username: player.username,
       color:    player.color,
@@ -57,88 +54,123 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    const lobby = lm.removePlayer(socket.id);
-    if (lobby) {
-      io.to(lobby.token).emit('lobby:playerLeft', { socketId: socket.id });
-    }
+    const battle = bm.removePlayer(socket.id);
+    if (battle) io.to(battle.token).emit('lobby:playerLeft', { socketId: socket.id });
   });
-
-  // -----------------------------------------------------------------------
-  // Player
-  // -----------------------------------------------------------------------
 
   socket.on('player:rename', ({ username } = {}) => {
-    if (!username || typeof username !== 'string') return;
+    if (typeof username !== 'string') return;
     const trimmed = username.trim().slice(0, 32);
     if (!trimmed) return;
-    const ok = lm.renamePlayer(socket.id, trimmed);
-    if (!ok) return;
-    const lobby = lm.lobbyForSocket(socket.id);
-    io.to(lobby.token).emit('player:renamed', { socketId: socket.id, username: trimmed });
+    if (!bm.renamePlayer(socket.id, trimmed)) return;
+    const battle = bm.battleForSocket(socket.id);
+    io.to(battle.token).emit('player:renamed', { socketId: socket.id, username: trimmed });
   });
 
   // -----------------------------------------------------------------------
-  // Objects — AD-4, AD-5
+  // Battle metadata
   // -----------------------------------------------------------------------
 
-  socket.on('object:add', ({ type, x, y, label } = {}) => {
-    const lobby = lm.lobbyForSocket(socket.id);
-    if (!lobby) return;
-    let obj;
-    try { obj = lm.addObject(lobby, { type, x, y, label }); }
+  socket.on('meta:set', (patch = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle) return;
+    const meta = bm.setMeta(battle, patch);
+    io.to(battle.token).emit('meta:updated', meta);
+  });
+
+  // -----------------------------------------------------------------------
+  // Roster
+  // -----------------------------------------------------------------------
+
+  socket.on('unit:add', (def = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle) return;
+    let unit;
+    try { unit = bm.addUnit(battle, def); }
     catch { return; }
-    io.to(lobby.token).emit('object:added', obj);
+    io.to(battle.token).emit('unit:added', unit);
   });
 
-  // Grab — AD-2: server is authoritative lock owner
-  socket.on('object:grab', ({ id } = {}) => {
-    const lobby = lm.lobbyForSocket(socket.id);
-    if (!lobby || !id) return;
-    const result = lm.grabObject(lobby, id, socket.id);
+  socket.on('unit:remove', ({ id } = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle || !id) return;
+    if (bm.removeUnit(battle, id)) io.to(battle.token).emit('unit:removed', { id });
+  });
+
+  // -----------------------------------------------------------------------
+  // The log (AD-7) — single write path for all board state
+  // -----------------------------------------------------------------------
+
+  socket.on('log:append', (raw = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle) return;
+    const ev = bm.appendEvent(battle, raw);
+    if (ev) io.to(battle.token).emit('log:appended', ev);
+  });
+
+  socket.on('log:undo', () => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle) return;
+    const seq = bm.undoLast(battle);
+    if (seq !== null) io.to(battle.token).emit('log:undone', { seq });
+  });
+
+  // -----------------------------------------------------------------------
+  // Cursor
+  // -----------------------------------------------------------------------
+
+  socket.on('battle:setCursor', (cursor = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle) return;
+    io.to(battle.token).emit('battle:cursorSet', bm.setCursor(battle, cursor));
+  });
+
+  socket.on('battle:stepCursor', ({ dir } = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle) return;
+    const next = bm.stepCursor(battle, dir > 0 ? 1 : -1);
+    io.to(battle.token).emit('battle:cursorSet', next);
+  });
+
+  // -----------------------------------------------------------------------
+  // Drag (movement phase) — position preview only. The authoritative
+  // position change is the `move` event the client appends on release.
+  // -----------------------------------------------------------------------
+
+  socket.on('unit:grab', ({ id } = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle || !id) return;
+    const result = bm.grabUnit(battle, id, socket.id);
     if (result.granted) {
-      socket.emit('object:grabGranted', { id });
-      // broadcast to everyone (incl. grabber) for lock indicator + z-update (AD-5)
-      io.to(lobby.token).emit('object:grabbed', { id, socketId: socket.id, z: result.z });
+      socket.emit('unit:grabGranted', { id });
+      io.to(battle.token).emit('unit:grabbed', { id, socketId: socket.id });
     } else {
-      socket.emit('object:grabDenied', { id, heldBy: result.heldBy });
+      socket.emit('unit:grabDenied', { id, heldBy: result.heldBy });
     }
   });
 
-  // Move — AD-3: relay to others only (sender does local prediction)
-  socket.on('object:move', ({ id, x, y } = {}) => {
-    const lobby = lm.lobbyForSocket(socket.id);
-    if (!lobby || !id) return;
-    lm.moveObject(lobby, id, x, y);
-    // not echoed to sender
-    socket.to(lobby.token).emit('object:moved', { id, x: Number(x), y: Number(y) });
+  socket.on('unit:drag', ({ id, x, y } = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle || !id) return;
+    socket.to(battle.token).emit('unit:dragged', { id, x: +x, y: +y });
   });
 
-  // Release — AD-3: final authoritative position, broadcast to all
-  socket.on('object:release', ({ id, x, y } = {}) => {
-    const lobby = lm.lobbyForSocket(socket.id);
-    if (!lobby || !id) return;
-    const obj = lm.releaseObject(lobby, id, socket.id, x, y);
-    if (!obj) return;
-    io.to(lobby.token).emit('object:released', { id, x: obj.x, y: obj.y });
-  });
-
-  socket.on('object:remove', ({ id } = {}) => {
-    const lobby = lm.lobbyForSocket(socket.id);
-    if (!lobby || !id) return;
-    const removed = lm.removeObject(lobby, id);
-    if (removed) io.to(lobby.token).emit('object:removed', { id });
-  });
-
-  socket.on('table:clear', () => {
-    const lobby = lm.lobbyForSocket(socket.id);
-    if (!lobby) return;
-    lm.clearTable(lobby);
-    io.to(lobby.token).emit('table:cleared', {});
+  socket.on('unit:release', ({ id } = {}) => {
+    const battle = bm.battleForSocket(socket.id);
+    if (!battle || !id) return;
+    bm.releaseUnit(battle, id);
+    io.to(battle.token).emit('unit:released', { id });
   });
 });
+
+// --- Housekeeping --------------------------------------------------------
+
+// Reclaim battles nobody has returned to. Runs hourly; the TTL itself lives
+// in lobbyManager.
+setInterval(() => bm.sweepEmptyBattles(), 60 * 60 * 1000).unref?.();
 
 // --- Start ---------------------------------------------------------------
 
 server.listen(PORT, () => {
-  console.log(`Topper backend listening on http://localhost:${PORT}`);
+  console.log(`Topper battle recorder listening on http://localhost:${PORT}`);
 });

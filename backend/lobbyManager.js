@@ -12,12 +12,27 @@ const PLAYER_COLORS = [
   '#ce93d8', '#80cbc4', '#f48fb1', '#fff176',
 ];
 
-// Per AD-4: base fields + per-type defaults
-const OBJECT_DEFAULTS = {
-  token: { width: 1.26, height: 1.26, color: '#e94560' },  // 32mm base
-  card:  { width: 2.5,  height: 3.5,  color: '#4fc3f7', faceUp: true },
-  tile:  { width: 3.0,  height: 3.0,  color: '#81c784' },
+// The two armies. Distinct from player colors: a player is a person in the
+// lobby, a side is an army on the board.
+const SIDE_COLORS = { A: '#e94560', B: '#4fc3f7' };
+
+const PHASES = ['command', 'movement', 'shooting', 'charge', 'fight'];
+const SIDES  = ['A', 'B'];
+
+// Per-kind defaults (AD-4 pattern: base + per-kind extension)
+const UNIT_DEFAULTS = {
+  unit:      { size: 2.0, startingStrength: 10 },
+  terrain:   { size: 6.0, startingStrength: 0  },
+  objective: { size: 1.6, startingStrength: 0  },
 };
+
+// Effect scale (AD-7) — the whole "roughly how effective" mechanic.
+const EFFECTS = ['whiff', 'light', 'moderate', 'heavy', 'wiped'];
+
+const EVENT_TYPES = new Set([
+  'deploy', 'move', 'shoot', 'charge', 'fight',
+  'battleshock', 'score', 'cp', 'destroy', 'note',
+]);
 
 // --- internal helpers ----------------------------------------------------
 
@@ -33,7 +48,6 @@ function pickColor(usedColors) {
   for (const c of PLAYER_COLORS) {
     if (!usedColors.has(c)) return c;
   }
-  // fallback: random hex when palette exhausted
   return '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
 }
 
@@ -48,173 +62,324 @@ function generateUsername(players) {
   return 'Player-' + uuidv4().slice(0, 4).toUpperCase();
 }
 
-// --- lobbies store -------------------------------------------------------
+// --- battles store -------------------------------------------------------
 
-// Map<token, Lobby>
-// Lobby = { token, players: Map<socketId, {username, color}>, objects: Map<id, Object>, locks: Map<objectId, socketId> }
-const lobbies = new Map();
+// Map<token, Battle>
+const battles = new Map();
 
-// reverse index: socketId → token (a socket can be in at most one lobby)
-const socketLobby = new Map();
+// reverse index: socketId → token (a socket is in at most one battle)
+const socketBattle = new Map();
 
-// --- public API ----------------------------------------------------------
+// --- battle lifecycle ----------------------------------------------------
 
-function createLobby() {
+function createBattle() {
   let token;
-  do { token = mintToken(); } while (lobbies.has(token));
-  const lobby = {
+  do { token = mintToken(); } while (battles.has(token));
+  const battle = {
     token,
-    players: new Map(),
-    objects: new Map(),
-    locks:   new Map(),
+    players: new Map(),      // socketId → { username, color }
+    meta: {
+      name: '',
+      date: new Date().toISOString().slice(0, 10),
+      mission: '',
+      sides: {
+        A: { name: 'Player A', faction: '' },
+        B: { name: 'Player B', faction: '' },
+      },
+    },
+    roster: new Map(),       // unitId → UnitDef (static)
+    log:    [],              // [Event] — append-only, the source of truth (AD-7)
+    cursor: { round: 1, side: 'A', phase: 'command' },
+    locks:  new Map(),       // unitId → socketId (drag locking)
+    nextSeq: 1,
   };
-  lobbies.set(token, lobby);
-  return lobby;
+  battles.set(token, battle);
+  return battle;
 }
 
-function getLobby(token) {
-  return lobbies.get(token) ?? null;
+function getBattle(token) {
+  return battles.get(token) ?? null;
 }
 
-function addPlayer(lobby, socketId) {
-  const usedColors = new Set([...lobby.players.values()].map(p => p.color));
-  const color    = pickColor(usedColors);
-  const username = generateUsername(lobby.players);
-  const player   = { username, color };
-  lobby.players.set(socketId, player);
-  socketLobby.set(socketId, lobby.token);
+function battleForSocket(socketId) {
+  const token = socketBattle.get(socketId);
+  return token ? battles.get(token) ?? null : null;
+}
+
+function addPlayer(battle, socketId) {
+  delete battle.emptyAt;   // rejoined — cancel the reclaim timer
+  const usedColors = new Set([...battle.players.values()].map(p => p.color));
+  const player = {
+    username: generateUsername(battle.players),
+    color:    pickColor(usedColors),
+  };
+  battle.players.set(socketId, player);
+  socketBattle.set(socketId, battle.token);
   return player;
 }
 
-// Returns the lobby the socket was in (or null), after removing them.
 function removePlayer(socketId) {
-  const token = socketLobby.get(socketId);
+  const token = socketBattle.get(socketId);
   if (!token) return null;
-  socketLobby.delete(socketId);
-  const lobby = lobbies.get(token);
-  if (!lobby) return null;
-  lobby.players.delete(socketId);
-  // release any locks held by this socket
-  for (const [objId, holder] of lobby.locks) {
-    if (holder === socketId) lobby.locks.delete(objId);
+  socketBattle.delete(socketId);
+  const battle = battles.get(token);
+  if (!battle) return null;
+  battle.players.delete(socketId);
+  for (const [unitId, holder] of battle.locks) {
+    if (holder === socketId) battle.locks.delete(unitId);
   }
-  // destroy lobby when last player leaves
-  if (lobby.players.size === 0) lobbies.delete(token);
-  return lobby;
+  // An empty battle is NOT destroyed straight away. The log is the whole
+  // deliverable here, so a dropped connection or a page reload must not
+  // take the record with it — it is reclaimed only after EMPTY_TTL_MS.
+  if (battle.players.size === 0) battle.emptyAt = Date.now();
+  return battle;
+}
+
+const EMPTY_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours — long enough to survive a whole game night
+
+function sweepEmptyBattles(now = Date.now()) {
+  let swept = 0;
+  for (const [token, battle] of battles) {
+    if (battle.players.size === 0 && battle.emptyAt && now - battle.emptyAt > EMPTY_TTL_MS) {
+      battles.delete(token);
+      swept++;
+    }
+  }
+  return swept;
 }
 
 function renamePlayer(socketId, username) {
-  const token = socketLobby.get(socketId);
-  if (!token) return false;
-  const lobby = lobbies.get(token);
-  if (!lobby) return false;
-  const player = lobby.players.get(socketId);
+  const battle = battleForSocket(socketId);
+  if (!battle) return false;
+  const player = battle.players.get(socketId);
   if (!player) return false;
   player.username = username;
   return true;
 }
 
-function lobbyForSocket(socketId) {
-  const token = socketLobby.get(socketId);
-  return token ? lobbies.get(token) ?? null : null;
-}
+// --- meta ----------------------------------------------------------------
 
-// --- object management ---------------------------------------------------
-
-function maxZ(lobby) {
-  let z = 0;
-  for (const obj of lobby.objects.values()) {
-    if (obj.z > z) z = obj.z;
+function setMeta(battle, patch = {}) {
+  const { name, date, mission, sides } = patch;
+  if (typeof name    === 'string') battle.meta.name    = name.slice(0, 80);
+  if (typeof date    === 'string') battle.meta.date    = date.slice(0, 32);
+  if (typeof mission === 'string') battle.meta.mission = mission.slice(0, 80);
+  if (sides && typeof sides === 'object') {
+    for (const s of SIDES) {
+      if (!sides[s]) continue;
+      if (typeof sides[s].name === 'string') {
+        battle.meta.sides[s].name = sides[s].name.slice(0, 40);
+      }
+      if (typeof sides[s].faction === 'string') {
+        battle.meta.sides[s].faction = sides[s].faction.slice(0, 40);
+      }
+    }
   }
-  return z;
+  return battle.meta;
 }
 
-function addObject(lobby, { type, x, y, label }) {
-  const defaults = OBJECT_DEFAULTS[type];
-  if (!defaults) throw new Error(`Unknown object type: ${type}`);
-  const id = uuidv4();
-  const z  = maxZ(lobby) + 1;
-  const obj = {
-    id,
-    type,
-    x: Number(x),
-    y: Number(y),
-    z,
-    width:  defaults.width,
-    height: defaults.height,
-    color:  defaults.color,
-    label:  label ?? '',
-    ...(type === 'card' ? { faceUp: defaults.faceUp } : {}),
+// --- roster --------------------------------------------------------------
+
+function addUnit(battle, { name, side, kind = 'unit', startingStrength, size } = {}) {
+  const defaults = UNIT_DEFAULTS[kind];
+  if (!defaults) throw new Error(`Unknown unit kind: ${kind}`);
+
+  // terrain and objectives belong to no side
+  const resolvedSide = kind === 'unit' ? (SIDES.includes(side) ? side : 'A') : null;
+
+  const unit = {
+    id:    uuidv4(),
+    name:  (name ?? '').toString().trim().slice(0, 40) || defaultName(kind),
+    side:  resolvedSide,
+    kind,
+    startingStrength: Number.isFinite(+startingStrength)
+      ? Math.max(0, Math.floor(+startingStrength))
+      : defaults.startingStrength,
+    size:  Number.isFinite(+size) ? Math.max(0.3, +size) : defaults.size,
+    color: resolvedSide ? SIDE_COLORS[resolvedSide]
+         : kind === 'objective' ? '#ffb74d'
+         : '#5a6b8c',
   };
-  lobby.objects.set(id, obj);
-  return obj;
+  battle.roster.set(unit.id, unit);
+  return unit;
 }
 
-// Returns { granted, z, heldBy } — z only set when granted.
-function grabObject(lobby, objectId, socketId) {
-  if (!lobby.objects.has(objectId)) return { granted: false, heldBy: null };
-  const holder = lobby.locks.get(objectId);
-  if (holder && holder !== socketId) return { granted: false, heldBy: holder };
-  const z = maxZ(lobby) + 1;
-  lobby.locks.set(objectId, socketId);
-  const obj = lobby.objects.get(objectId);
-  obj.z = z;
-  return { granted: true, z };
+function defaultName(kind) {
+  return kind === 'terrain' ? 'Ruins'
+       : kind === 'objective' ? 'Objective'
+       : 'Unit';
 }
 
-function moveObject(lobby, objectId, x, y) {
-  const obj = lobby.objects.get(objectId);
-  if (!obj) return false;
-  obj.x = Number(x);
-  obj.y = Number(y);
-  return true;
+function removeUnit(battle, unitId) {
+  battle.locks.delete(unitId);
+  return battle.roster.delete(unitId);
 }
 
-// Returns the released object (with authoritative final position), or null.
-function releaseObject(lobby, objectId, socketId, x, y) {
-  if (!lobby.locks.get(objectId) === socketId) {
-    // even if lock mismatch, still update position (last-write-wins is fine here)
+// --- log (AD-7) ----------------------------------------------------------
+
+// Server stamps id/seq/cursor so ordering is authoritative and clients
+// cannot disagree about when something happened.
+function appendEvent(battle, raw = {}) {
+  if (!EVENT_TYPES.has(raw.type)) return null;
+
+  const ev = {
+    id:    uuidv4(),
+    seq:   battle.nextSeq++,
+    ts:    Date.now(),
+    round: battle.cursor.round,
+    side:  battle.cursor.side,
+    phase: battle.cursor.phase,
+    type:  raw.type,
+  };
+
+  switch (raw.type) {
+    case 'deploy':
+      if (!battle.roster.has(raw.unitId)) return null;
+      Object.assign(ev, { unitId: raw.unitId, x: +raw.x, y: +raw.y });
+      break;
+
+    case 'move':
+      if (!battle.roster.has(raw.unitId)) return null;
+      Object.assign(ev, {
+        unitId:   raw.unitId,
+        from:     raw.from ? { x: +raw.from.x, y: +raw.from.y } : null,
+        to:       { x: +raw.to.x, y: +raw.to.y },
+        moveType: ['stationary','normal','advance','fallback','reserves'].includes(raw.moveType)
+                  ? raw.moveType : 'normal',
+      });
+      break;
+
+    case 'shoot':
+    case 'fight':
+      if (!battle.roster.has(raw.targetId)) return null;
+      Object.assign(ev, {
+        [raw.type === 'shoot' ? 'shooterId' : 'attackerId']:
+          raw.shooterId ?? raw.attackerId,
+        targetId: raw.targetId,
+        effect:   EFFECTS.includes(raw.effect) ? raw.effect : 'light',
+      });
+      break;
+
+    case 'charge':
+      Object.assign(ev, {
+        chargerId: raw.chargerId,
+        targetId:  raw.targetId,
+        success:   !!raw.success,
+      });
+      break;
+
+    case 'battleshock':
+      if (!battle.roster.has(raw.unitId)) return null;
+      Object.assign(ev, { unitId: raw.unitId, passed: !!raw.passed });
+      break;
+
+    case 'score':
+      Object.assign(ev, {
+        side:  SIDES.includes(raw.side) ? raw.side : battle.cursor.side,
+        vp:    Math.max(0, Math.floor(+raw.vp || 0)),
+        kind:  raw.kind === 'secondary' ? 'secondary' : 'primary',
+        label: (raw.label ?? '').toString().slice(0, 60),
+      });
+      break;
+
+    case 'cp':
+      Object.assign(ev, {
+        side:   SIDES.includes(raw.side) ? raw.side : battle.cursor.side,
+        delta:  Math.trunc(+raw.delta || 0),
+        reason: (raw.reason ?? '').toString().slice(0, 60),
+      });
+      break;
+
+    case 'destroy':
+      if (!battle.roster.has(raw.unitId)) return null;
+      Object.assign(ev, { unitId: raw.unitId });
+      break;
+
+    case 'note':
+      Object.assign(ev, { text: (raw.text ?? '').toString().slice(0, 280) });
+      break;
   }
-  lobby.locks.delete(objectId);
-  const obj = lobby.objects.get(objectId);
-  if (!obj) return null;
-  obj.x = Number(x);
-  obj.y = Number(y);
-  return obj;
+
+  battle.log.push(ev);
+  return ev;
 }
 
-function removeObject(lobby, objectId) {
-  lobby.locks.delete(objectId);
-  return lobby.objects.delete(objectId);
+// Pops the most recent event. Returns its seq, or null if the log is empty.
+function undoLast(battle) {
+  const ev = battle.log.pop();
+  return ev ? ev.seq : null;
 }
 
-function clearTable(lobby) {
-  lobby.objects.clear();
-  lobby.locks.clear();
+// --- cursor --------------------------------------------------------------
+
+function setCursor(battle, { round, side, phase } = {}) {
+  const r = Math.max(1, Math.floor(+round || 1));
+  battle.cursor = {
+    round: r,
+    side:  SIDES.includes(side)   ? side  : 'A',
+    phase: PHASES.includes(phase) ? phase : 'command',
+  };
+  return battle.cursor;
 }
 
-// Snapshot for lobby:state
-function lobbySnapshot(lobby, socketId) {
+// Step the cursor forward/back through the 5x2x5 state machine.
+function stepCursor(battle, dir) {
+  const { round, side, phase } = battle.cursor;
+  let pi = PHASES.indexOf(phase);
+  let si = SIDES.indexOf(side);
+  let r  = round;
+
+  if (dir > 0) {
+    pi++;
+    if (pi >= PHASES.length) { pi = 0; si++; }
+    if (si >= SIDES.length)  { si = 0; r++; }
+  } else {
+    pi--;
+    if (pi < 0) { pi = PHASES.length - 1; si--; }
+    if (si < 0) { si = SIDES.length - 1; r--; }
+    if (r < 1) return battle.cursor; // clamp at the very start
+  }
+
+  battle.cursor = { round: r, side: SIDES[si], phase: PHASES[pi] };
+  return battle.cursor;
+}
+
+// --- drag locking (movement phase only) ----------------------------------
+
+function grabUnit(battle, unitId, socketId) {
+  if (!battle.roster.has(unitId)) return { granted: false, heldBy: null };
+  const holder = battle.locks.get(unitId);
+  if (holder && holder !== socketId) return { granted: false, heldBy: holder };
+  battle.locks.set(unitId, socketId);
+  return { granted: true };
+}
+
+function releaseUnit(battle, unitId) {
+  battle.locks.delete(unitId);
+}
+
+// --- snapshot ------------------------------------------------------------
+
+function battleSnapshot(battle, socketId) {
   return {
-    token:   lobby.token,
+    token:   battle.token,
     yourId:  socketId,
-    players: [...lobby.players.entries()].map(([id, p]) => ({ socketId: id, ...p })),
-    objects: [...lobby.objects.values()],
+    meta:    battle.meta,
+    players: [...battle.players.entries()].map(([id, p]) => ({ socketId: id, ...p })),
+    roster:  [...battle.roster.values()],
+    log:     battle.log,
+    cursor:  battle.cursor,
   };
 }
 
 module.exports = {
-  createLobby,
-  getLobby,
-  addPlayer,
-  removePlayer,
-  renamePlayer,
-  lobbyForSocket,
-  addObject,
-  grabObject,
-  moveObject,
-  releaseObject,
-  removeObject,
-  clearTable,
-  lobbySnapshot,
+  PHASES, SIDES, EFFECTS, SIDE_COLORS,
+  createBattle, getBattle, battleForSocket, sweepEmptyBattles,
+  addPlayer, removePlayer, renamePlayer,
+  setMeta,
+  addUnit, removeUnit,
+  appendEvent, undoLast,
+  setCursor, stepCursor,
+  grabUnit, releaseUnit,
+  battleSnapshot,
 };

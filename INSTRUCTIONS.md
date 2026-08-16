@@ -1,39 +1,39 @@
-# Topper — 2D Top-Down Tabletop Simulator
+# Topper — 40k Battle Recorder
 
-A real-time multiplayer tabletop simulator where players join a shared lobby and interact with objects on a virtual table together.
+Log a game of Warhammer 40,000 as it happens, then get an after-action report out the other end: a turn-by-turn narrative, a board you can scrub through, and a short replay video.
 
 ---
 
-## Vision
+## What this is (and isn't)
 
-Topper is a browser-based, 2D top-down virtual tabletop. Players join a shared lobby using a short session token, then see and interact with a shared canvas — moving objects (cards, tiles, and other pieces) in real time. Think of it as a lightweight, no-install alternative to Roll20 or Tabletop Simulator, built on the same stack as [Roller](https://github.com/Sam-A-C/Roller).
+Topper records a battle. It does **not** run one.
 
-### Core design principle — one path, no solo/multiplayer split
+- It is **not** a virtual tabletop — you are playing on a real table (or someone else's), and Topper sits alongside capturing what happened.
+- It is **not** a rules engine. It knows the *shape* of a 40k turn (the five phases) and nothing else. No weapon profiles, no dice, no wound tracking, no legality checks.
+- Granularity is deliberately **coarse**. Per phase you record the broad strokes: who shot whom and roughly how much it hurt. Never individual dice.
 
-Unlike Roller, which has **separate code paths** for solo and multiplayer, Topper has exactly one. **Every session is a real, server-backed lobby with a token from the moment it's created.** Solo play is simply a lobby with one player in it; "multiplayer" is just what happens when a second person joins using the token. There is no solo state store, no local-vs-server branching, and no "promote to multiplayer" transition.
+The output is the point. Everything in the app exists to make the report good.
 
-Consequences of this principle (decided up front):
-- **The backend must be running for any session, including solo.** There is no offline "just open the file" mode (that was a Roller property we are deliberately trading away for a single clean code path).
-- **A shareable token is minted on Start, always.** Any solo game can become multiplayer the instant the token is shared — no extra step.
+### One token per unit
+
+A unit is a single marker, not a pile of models. You drag one token per unit around a board. Model counts exist only as a rough strength number that depletes as the unit takes hits.
 
 ---
 
 ## Tech Stack
 
-Same pattern as Roller — no build step for the frontend, minimal backend.
+No build step, minimal backend.
 
 | Layer | Technology |
 |---|---|
 | Frontend | Vanilla JS, HTML, CSS (no framework, no bundler) |
 | Backend | Node.js + Express + Socket.io |
 | Real-time | Socket.io (WebSocket with fallback) |
-| Session state | In-memory (ephemeral, no DB) |
+| Battle state | In-memory (ephemeral, reclaimed after 6h idle) |
 
 ---
 
 ## Visual Style
-
-Inherit the Roller dark theme:
 
 ```css
 :root {
@@ -49,10 +49,7 @@ Inherit the Roller dark theme:
 }
 ```
 
-- Dark navy base with red accent buttons
-- Rounded cards, subtle borders
-- Responsive layout — works on desktop; mobile is secondary
-- Light mode optional (toggle via `<html class="light-mode">`)
+Dark navy base, red accent. Side A renders red, side B renders blue.
 
 ---
 
@@ -60,242 +57,174 @@ Inherit the Roller dark theme:
 
 ```
 Topper/
-├── index.html          # Home screen + lobby join + canvas view
-├── app.js              # All frontend logic
-├── socket-client.js    # Socket.io connection + event wrappers
-├── style.css           # All styles (CSS custom properties)
+├── index.html          # Home / Battle / Report screens
+├── app.js              # UI, canvas, input, sockets, report, replay
+├── battle.js           # Pure fold + narrative logic (no DOM, no sockets)
+├── socket-client.js    # Socket.io wrapper
+├── style.css           # All styles
 └── backend/
-    ├── server.js           # Express + Socket.io event handlers
-    ├── lobbyManager.js     # In-memory lobby/object state
+    ├── server.js           # Express + Socket.io handlers
+    ├── lobbyManager.js     # In-memory battle state
     ├── package.json
     └── .env.example
 ```
 
----
-
-## Screens
-
-There are only **two screens total**: the Home screen and the Table view. The Table view is identical whether one or many players are present — the only visible difference is how many entries appear in the player list.
-
-### Usernames
-
-Usernames are **auto-generated** on join (e.g. `Player-A4`) so that Start is genuinely one click with no form. Players can **rename themselves later** from the Table view (click own entry in the player list → inline edit → broadcast the new name). No username field on the Home screen.
-
-### No host concept
-
-There is **deliberately no host/owner role that the user ever sees or considers.** Every player has identical capabilities — anyone can add, move, remove objects, or clear the table. When any player leaves (including the original creator), the lobby simply persists for whoever remains. The lobby is only destroyed when the **last** player leaves. Internally there is no `hostId` and no special-cased socket; the creator is just the first entry in `players`.
-
-### 1. Home Screen
-- Title + subtitle, centered card layout (same as Roller's home screen)
-- Two actions only:
-  - **Start** — creates a new server-backed lobby, mints a 6-char token, joins as the first player. Goes straight to the Table view.
-  - **Join** — reveals a token input; joins the existing lobby and goes to the Table view.
-- No username field on either action — usernames are auto-generated server-side (see "Usernames" above) and renamed later from the Table view.
-
-### 2. Table View (the only gameplay screen)
-- Full-viewport canvas area (the tabletop)
-- Sidebar: player list with colors + the lobby token display (copy button) — always shown, even solo, so sharing is one click away
-- Top bar: lobby token, leave button
-- Objects rendered on canvas; each player has a distinct color
-- **No solo/multiplayer distinction in the UI** — a one-player lobby and a five-player lobby use the exact same view and the exact same code.
+`battle.js` is deliberately dependency-free so the exported report can inline it verbatim.
 
 ---
 
 ## Architecture Decisions
 
-These are foundational choices made during planning. They shape the protocol and render code, and are cheap now but expensive to retrofit — treat them as load-bearing.
-
 ### AD-1: World-space coordinates
 
-All object positions are stored in **world space** — an abstract coordinate plane independent of the viewport or screen size. **The server only ever knows world coordinates.**
+Positions are stored in **world space**, 1 unit = 1 inch. The server only ever sees world coordinates. Each client holds `camera = { x, y, zoom }` and converts at render time. No screen pixel ever crosses the network.
 
-- Each client holds a `camera = { x, y, zoom }` and converts at render time via two helpers:
-  - `worldToScreen(wx, wy)` → pixel position on the canvas
-  - `screenToWorld(sx, sy)` → world position (used to interpret mouse events)
-- In Phase 1 the camera is fixed at `{ x: 0, y: 0, zoom: 1 }`, so nothing visible changes.
-- In Phase 2, pan/zoom is "let the user change the camera" — **zero server changes, zero protocol changes.**
-- **Rule:** no raw screen pixels ever cross the network or get stored in an object. Mouse coordinates are converted to world space *immediately* on input.
+### AD-2: First-grab-wins locking
 
-### AD-2: First-grab-wins locking (server-authoritative)
+The server owns the `locks` map. `unit:grab` is granted or denied; a client must not drag until granted. Applies only to movement-phase dragging.
 
-The server owns the `locks` map and is the source of truth for who holds an object.
+### AD-3: Local prediction
 
-- On `object:grab`, the server checks the lock. If free, it grants the lock and **replies to the grabber** with `object:grabGranted`; otherwise replies `object:grabDenied`. It also broadcasts `object:grabbed` to everyone so they can render the lock indicator.
-- A client **must not begin dragging** until it receives `object:grabGranted`. (Local prediction for *position* is fine — see AD-3 — but the grab itself is gated on the server's grant.)
-- A denied grabber simply can't move the object until the holder releases it.
-- On disconnect, the server releases any locks held by that socket and broadcasts `object:released`.
+The dragging client moves its token locally and immediately, streaming `unit:drag` for others to preview. The authoritative change is the `move` event appended on release — see AD-7.
 
-### AD-3: Local prediction + authoritative release
+### AD-4: Roster entries as base + kind
 
-The dragging player gets instant feedback; consistency is reconciled on release.
-
-- Once granted, the dragger moves the object **locally and immediately**, streaming `object:move` to the server, which relays `object:moved` to other clients. The dragger ignores echoes of its own moves.
-- On mouse-up the dragger emits `object:release` carrying the **final world position**, which the server records authoritatively and broadcasts via `object:released`. This reconciles any dropped intermediate updates.
-- Non-dragging clients may interpolate toward incoming positions for smoothness (Phase 2 polish, optional).
-
-### AD-4: Objects as programming-style objects (base + per-type extension)
-
-Everything on the table is an **Object** (the generic noun). The kind of object lives in a `type` field — `token`, `card`, `tile` are **type enum values**, treated like subclasses. Generic code (drag, lock, render, hit-test) operates only on the **base** and never branches on `type`; type-specific behaviour layers on top.
-
-> **Terminology:** game pieces are always called **objects** in code and docs. The word **"token"** as a standalone noun is reserved for the **lobby code**; as an object kind it only ever appears as the enum value `type: "token"`.
+Everything on the board is a roster entry with a `kind`: `unit`, `terrain`, or `objective`. Generic code (drag, render, hit-test) operates on the base and never branches on kind; per-kind defaults live in one `UNIT_DEFAULTS` table on the server.
 
 ```
-Object (base — every object has these)
-  id        string   // uuid v4, server-assigned
-  type      "token" | "card" | "tile"
-  x, y      number   // world coords (AD-1)
-  z         number   // stacking order (AD-5 / bring-to-front)
-  width     number
-  height    number
-  color     string   // hex
-  label     string
-
-// per-type extensions (Phase 1)
-  token:  {}                 // small square; no extra fields yet
-  card:   { faceUp: boolean } // tall rectangle; flippable
-  tile:   {}                 // large square; no extra fields yet
+UnitDef
+  id, name, side ('A'|'B'|null), kind, startingStrength, size, color
 ```
 
-- The base carries all generic behaviour. A new object kind in the future = add a `type` value + its default factory; the drag/lock/render pipeline is untouched.
-- Per-type defaults (size, color, spawn shape) live in a single `OBJECT_DEFAULTS[type]` table on the server so `object:add` only needs `{ type, x, y, label }` and the server fills the rest.
+### AD-5: Draw order
 
-### AD-5: Z-ordering (bring-to-front)
+Units draw and hit-test above objectives, which draw above terrain, so clicking a unit standing on a ruin grabs the unit.
 
-`z` defines draw and hit-test order (higher = on top).
-- New objects spawn at `maxZ + 1`.
-- Grabbing an object brings it to front (`maxZ + 1`) so the thing you're moving is always on top — the intuitive tabletop feel. The server assigns the new `z` and broadcasts it on `object:grabbed` (which carries `z`), so every client re-sorts.
-- Hit-testing scans objects in descending `z` (topmost first) so a click grabs the visually-top object.
+### AD-6: Inches everywhere
 
-### AD-6: Measurement units — inches by default, `mm` opt-in, always report inches
+The world unit is the inch. Distances in the report are always shown in inches.
 
-The internal world unit is the **inch** (1 world unit = 1 inch — see AD-1). The whole app shares one measurement convention:
-- **Input:** a number is interpreted as **inches** by default. A trailing `mm` suffix (e.g. `32mm`) means millimetres, converted via **1 inch = 25.4 mm** (`inches = mm / 25.4`).
-- **Output:** measurements are **always displayed in inches** (e.g. the ruler readout, distances), regardless of how they were entered.
-- Applies everywhere a length is entered or shown — ruler tool, base sizes, ranges, object dimensions. A single `parseLength(str)` → inches helper and a `formatLength(inches)` → string helper enforce this app-wide.
-- Rationale: 40k movement/ranges are in inches but model **base sizes** are quoted in mm — this lets base sizes be typed naturally (`32mm`) while everything resolves to one internal unit.
+### AD-7: The log is the source of truth ★
+
+The load-bearing decision. A battle is an **append-only list of events**; board state at any moment is derived by folding that list:
+
+```
+boardStateAt(seq) = fold(log.filter(e => e.seq <= seq))
+```
+
+Unit positions and strengths are a **derived cache, never authoritative**. No feature writes board state directly — everything appends an event. This single choice provides timeline scrubbing, replay animation, video export, undo, and report generation from one mechanism.
+
+The server assigns `id` and `seq` and stamps each event with the current cursor, so ordering is authoritative and clients cannot disagree about when something happened.
+
+#### Event types
+
+Every event carries `{ id, seq, ts, round, side, phase, type }` plus:
+
+| type | fields |
+|---|---|
+| `deploy` | `unitId, x, y` |
+| `move` | `unitId, from{x,y}, to{x,y}, moveType` |
+| `shoot` | `shooterId, targetId, effect` |
+| `fight` | `attackerId, targetId, effect` |
+| `charge` | `chargerId, targetId, success` |
+| `battleshock` | `unitId, passed` |
+| `score` | `side, vp, kind, label` |
+| `cp` | `side, delta, reason` |
+| `destroy` | `unitId` |
+| `note` | `text` |
+
+`moveType` ∈ `stationary | normal | advance | fallback | reserves`.
+
+#### The effect scale
+
+The whole "roughly how effective" mechanic is one 5-point enum:
+
+| effect | narrative | strength cost |
+|---|---|---|
+| `whiff` | to no effect | 0% |
+| `light` | for light damage | 10% |
+| `moderate` | for moderate damage | 33% |
+| `heavy` | for heavy damage | 66% |
+| `wiped` | wiping it out | 100% |
+
+Attrition is **advisory** — it drives how depleted a token looks and nothing else. It is broad strokes, not bookkeeping.
+
+### AD-8: Battles outlive their connections
+
+The log is the deliverable, so an empty battle is not destroyed on disconnect. It is marked and reclaimed only after 6 hours idle, and any rejoin cancels the timer. A dropped connection or a page reload must never take the record with it.
 
 ---
 
-## Core Features (Phase 1)
+## The cursor
 
-### Objects
-- Schema and terminology defined in **AD-4** (base + per-type extension; "object" generic, "token" reserved for lobby code)
-- Rendered as colored rectangles with a centered label — no images required for Phase 1
-- Any player can grab any unlocked object (see AD-2)
-
-### Drag & Drop
-- Mouse down on an object → emit `object:grab`; **wait for `object:grabGranted`** before dragging (AD-2)
-- Mouse move → convert pointer to world space, update locally, emit `object:move` with `{ id, x, y }` (world coords)
-- Mouse up → emit `object:release` with the final `{ id, x, y }` (AD-3)
-- Other clients update position on `object:moved`; locked objects show a 2px border in the holder's color
-
-### Adding Objects
-- Toolbar or right-click context menu: "Add Token", "Add Card", "Add Tile"
-- Any player can clear the table (no host restriction)
-
-### Real-time Sync
-All object state lives on the server. New joiners receive full state snapshot.
+`round 1..N` × `side A|B` × `phase command → movement → shooting → charge → fight`. Matches the 11th edition turn sequence. Advancing past Fight rolls to the next side; past side B's Fight rolls to the next round. The cursor is shared — everyone logging sees the same phase.
 
 ---
 
-## Backend Architecture
+## Screens
 
-### lobbyManager.js
+### 1. Home
+**New Battle** mints a 6-char token; **Join** enters an existing one.
 
-```
-Lobby {
-  token: string           // 6-char alphanumeric
-  players: Map<socketId, { username, color }>  // first entry = creator, but not privileged
-  objects: Map<id, Object>
-  locks: Map<objectId, socketId>  // who is currently dragging what
-}
-```
+### 2. Battle (the logging cockpit)
+- Top bar: token, phase stepper, Report / Leave
+- Phase rail: the five phases, click to jump
+- Canvas: board (44"×60") with a Reserves strip per side
+- Sidebar: VP/CP per side, roster, this phase's log, who's recording
+- Bottom: **phase-contextual entry bar**
 
-- No `hostId` / no privileged player — every player is equal (see "No host concept")
-- Lobbies persist as players come and go; auto-delete only when the **last** player leaves
-- Object IDs: `uuid v4`
-- Player colors: assigned from a fixed palette on join
+Undeployed units sit in their side's Reserves strip — drag one onto the board and it deploys. No separate deployment UI.
 
-### Socket Events
+#### Entry bar by phase
+
+| Phase | Controls |
+|---|---|
+| Command | `[Unit ▾]` → Passed / Failed · VP `+1..+5` · CP −1/+1 |
+| Movement | Drag on the board; move-type chips pick how it moved |
+| Shooting | `[Shooter ▾] [Target ▾]` → effect chips |
+| Charge | `[Charger ▾] [Target ▾]` → Made it / Failed |
+| Fight | `[Attacker ▾] [Target ▾]` → effect chips |
+
+Clicking tokens on the canvas fills the pickers — own side sets the actor, enemy sets the target — so most events are two or three clicks. Dropdowns filter to living units on the correct side automatically.
+
+### 3. Report
+Turn-by-turn narrative grouped round → side → phase, final score, casualties, an effectiveness table, plus **Replay**, **Export video** (`.webm` via `MediaRecorder`), and **Export JSON**.
+
+---
+
+## Socket Events
 
 | Event | Direction | Payload |
 |---|---|---|
-| `lobby:start` | client→server | `{}` _(username auto-generated server-side)_ |
-| `lobby:join` | client→server | `{ token }` |
-| `lobby:state` | server→client | `{ players, objects, token, yourId }` |
-| `lobby:playerJoined` | server→all | `{ socketId, username, color }` |
-| `lobby:playerLeft` | server→all | `{ socketId }` |
-| `player:rename` | client→server | `{ username }` |
-| `player:renamed` | server→all | `{ socketId, username }` |
-| `object:add` | client→server | `{ type, x, y, label }` _(world coords)_ |
-| `object:added` | server→all | full object _(incl. server-assigned `id`, `z`)_ |
-| `object:grab` | client→server | `{ id }` |
-| `object:grabGranted` | server→grabber | `{ id }` — _grabber may now drag (AD-2)_ |
-| `object:grabDenied` | server→grabber | `{ id, heldBy }` — _object already locked_ |
-| `object:grabbed` | server→all | `{ id, socketId, z }` — _render lock indicator + bring-to-front (AD-5)_ |
-| `object:move` | client→server | `{ id, x, y }` _(world coords)_ |
-| `object:moved` | server→others | `{ id, x, y }` _(world coords; not echoed to sender)_ |
-| `object:release` | client→server | `{ id, x, y }` _(final authoritative world pos, AD-3)_ |
-| `object:released` | server→all | `{ id, x, y }` |
-| `object:remove` | client→server | `{ id }` |
-| `object:removed` | server→all | `{ id }` |
-| `table:clear` | client→server | `{}` _(any player)_ |
-| `table:cleared` | server→all | `{}` |
-
----
-
-## Frontend Architecture
-
-### app.js Structure
-
-- **State** — flat module-scope: `mySocketId`, `myColor`, `objects` (Map), `locks` (Map), `camera` ({ x, y, zoom }, see AD-1), `dragging` (current drag state)
-- **Home flow** — Start or Join → connect socket → emit `lobby:start`/`lobby:join` → receive `lobby:state` (stores `yourId`) → show table view
-- **Render loop** — `requestAnimationFrame` loop redraws canvas each frame from `objects` Map, sorted by `z` (low→high)
-- **Input** — mousedown/mousemove/mouseup; pointer converted to world space via `screenToWorld` *immediately*; hit-test objects in reverse `z` order (top first)
-- **Grab gating** — mousedown emits `object:grab` and stores a "pending grab"; dragging only starts on `object:grabGranted` (ignore / cursor-feedback on `object:grabDenied`) — AD-2
-- **Sidebar** — player list updates on `lobby:playerJoined` / `lobby:playerLeft` / `player:renamed`; clicking your own entry lets you rename (emits `player:rename`)
-
-### Coordinate helpers (AD-1)
-
-```js
-function worldToScreen(wx, wy) {
-  return { x: (wx - camera.x) * camera.zoom, y: (wy - camera.y) * camera.zoom };
-}
-function screenToWorld(sx, sy) {
-  return { x: sx / camera.zoom + camera.x, y: sy / camera.zoom + camera.y };
-}
-```
-Phase 1: `camera = { x: 0, y: 0, zoom: 1 }`, so these are effectively identity — but all code routes through them so Phase 2 pan/zoom is a no-op for everything else.
-
-### Canvas Rendering
-
-- Draw objects in ascending `z` order so higher-`z` objects land on top
-- Each object: `worldToScreen` its corner, draw a filled rounded rectangle scaled by `camera.zoom`, label centered in white text
-- Locked objects show a 2px border in the holder's color; my own grabbed object renders with a dashed border
-- Phase 1 camera is fixed, but rendering already goes through the camera transform (AD-1)
-
-### socket-client.js
-
-Thin wrapper: exports `connectSocket(serverUrl)`, `emit(event, data)`, `on(event, cb)`. Mirrors the Roller pattern.
+| `battle:start` | c→s | `{}` |
+| `battle:join` | c→s | `{ token }` |
+| `battle:state` | s→c | `{ token, yourId, meta, players, roster, log, cursor }` |
+| `battle:error` | s→c | `{ message }` |
+| `battle:setCursor` / `battle:stepCursor` | c→s | `{ round, side, phase }` / `{ dir }` |
+| `battle:cursorSet` | s→all | `{ round, side, phase }` |
+| `meta:set` / `meta:updated` | c→s / s→all | `{ name, date, mission, sides }` |
+| `unit:add` / `unit:added` | c→s / s→all | UnitDef |
+| `unit:remove` / `unit:removed` | c→s / s→all | `{ id }` |
+| `log:append` / `log:appended` | c→s / s→all | event |
+| `log:undo` / `log:undone` | c→s / s→all | `{}` / `{ seq }` |
+| `unit:grab` | c→s | `{ id }` |
+| `unit:grabGranted` / `unit:grabDenied` | s→grabber | `{ id }` / `{ id, heldBy }` |
+| `unit:grabbed` / `unit:released` | s→all | `{ id, socketId }` / `{ id }` |
+| `unit:drag` / `unit:dragged` | c→s / s→others | `{ id, x, y }` |
+| `lobby:playerJoined` / `lobby:playerLeft` | s→all | `{ socketId, … }` |
+| `player:rename` / `player:renamed` | c→s / s→all | `{ username }` |
 
 ---
 
 ## Development
 
-### Running locally
-
 ```bash
-# Backend
 cd backend
 npm install
-npm start        # listens on :3000
-
-# Frontend
-# open index.html directly in browser, or serve via backend static files
+npm start        # listens on :3000, also serves the frontend
 ```
 
-### Environment variables (`backend/.env`)
-
+`backend/.env`:
 ```
 PORT=3000
 CORS_ORIGIN=*
@@ -303,12 +232,6 @@ CORS_ORIGIN=*
 
 ---
 
-## Phase 2 Ideas (not in scope now)
+## Not in scope
 
-- Pan & zoom the canvas (transform matrix)
-- Image upload for objects (models/cards)
-- Dice rolling integrated (pull from Roller)
-- Fog of war / hidden objects per player
-- Snap-to-grid toggle
-- Persistent lobbies (SQLite or Redis)
-- Mobile touch drag support
+Weapon profiles, dice resolution, enforced wound tracking, army list building, turn/phase enforcement, line of sight — anything that requires encoding the rulebook. Topper records; the humans play.
